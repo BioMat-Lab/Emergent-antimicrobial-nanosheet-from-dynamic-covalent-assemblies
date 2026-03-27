@@ -1,0 +1,1 @@
+The code used for all omics analyses described in this study (“Emergent antimicrobial nanosheets from dynamic covalent assemblies”) is available online: https://github.com/BioMat-Lab/Emergent-antimicrobial-nanosheet-from-dynamic-covalent-assemblies.
