@@ -1,0 +1,1342 @@
+```{r sys.set}
+root_path <- ""
+data_folder <- "07.data"
+res_folder <- "08.result"
+code_folder <- "09.pp.code"
+
+setwd(file.path(root_path, code_folder))
+save(root_path, res_folder, data_folder, code_folder, 
+     file = "sys.set.Rdata")
+```
+```{r Compile and Read in expression matrix}
+##============================================================================##
+# Program: Import expression matrix
+##============================================================================##
+library(tidyverse)
+library(readxl)
+library(writexl)
+
+setwd(file.path(root_path, data_folder, "./result/1.3.gene_expression"))
+dt <- read_xlsx("FPKM_anno.xlsx", sheet = "FPKM_anno")
+
+dt_df <- dt %>%
+  dplyr::select(
+    "id",
+    "unhealthy-1", "unhealthy-2", "unhealthy-3",
+    "healthy-1", "healthy-2", "healthy-3",
+    "A5B5-1", "A5B5-2", "A5B5-3"
+  ) %>%
+  as.data.frame() %>%
+  tibble::column_to_rownames("id")
+
+rownames <- rownames(dt_df)
+
+matrix <- as.matrix(dt_df)
+matrix_num <- matrix(as.numeric(matrix), nrow = nrow(matrix), ncol = ncol(matrix))
+matrix_log <- log2(matrix_num + 1)
+
+rownames(matrix_log) <- rownames(dt_df)
+colnames(matrix_log) <- colnames(dt_df)
+
+clinical <- data.frame(
+  group = c(rep("Unhealthy", 3), rep("Healthy", 3), rep("A5B5", 3)),
+  samples = c(
+    "unhealthy-1", "unhealthy-2", "unhealthy-3",
+    "healthy-1", "healthy-2", "healthy-3",
+    "A5B5-1", "A5B5-2", "A5B5-3"
+  )
+)
+
+setwd(file.path(root_path, res_folder, "RNA-01.Exp,DEGs"))
+saveRDS(matrix_log, file = "matrix_Log2FPKM.Rds")
+saveRDS(clinical, file = "clinical.Rds")
+
+df_matrix_log <- data.frame(matrix_log, row.names = rownames)
+colnames(df_matrix_log) <- colnames(dt_df)
+df_matrix_log_output <- df_matrix_log %>%
+  tibble::rownames_to_column("genes")
+write_xlsx(df_matrix_log_output, path = "matrix_Log2FPKM.xlsx")
+
+# Load expression matrix
+setwd(file.path(root_path, res_folder, "RNA-01.Exp,DEGs"))
+matrix <- readRDS("matrix_Log2FPKM.Rds")
+clinical <- readRDS("clinical.Rds")
+```
+```{r PCA Analysis}
+##============================================================================##
+# Program: PCA analysis
+##============================================================================##
+library(tidyverse)
+
+setwd(file.path(root_path, res_folder, "RNA-01.Exp,DEGs"))
+matrix <- readRDS("matrix_Log2FPKM.Rds")
+clinical <- readRDS("clinical.Rds")
+
+clinical$Group <- clinical$group
+clinical$Group <- factor(clinical$Group, levels = c("Unhealthy", "Healthy", "A5B5"))
+
+library(Rtsne)
+
+fxx.plot_tsne <- function(tsne_data,
+                          group = NULL,
+                          x_col = "TSNE1",
+                          y_col = "TSNE2",
+                          mycol = NULL) {
+  
+  library(doBy)
+  library(Rtsne)
+  library(ggplot2)
+  library(tidyverse)
+  
+  # Check required columns
+  if (!all(c(x_col, y_col) %in% colnames(tsne_data))) {
+    stop(paste("Error: Required columns", x_col, "and/or", y_col, "not found in the data."))
+  }
+  
+  # Automatically detect grouping column if not provided
+  if (is.null(group)) {
+    other_cols <- setdiff(colnames(tsne_data), c(x_col, y_col))
+    tsne_data <- tsne_data[, c(x_col, y_col, other_cols)]
+    
+    potential_group <- NULL
+    for (col in colnames(tsne_data)[3:ncol(tsne_data)]) {
+      n_unique <- length(unique(tsne_data[[col]]))
+      if (n_unique > 1 && n_unique < nrow(tsne_data)) {
+        potential_group <- col
+        break
+      }
+    }
+    
+    if (is.null(potential_group)) {
+      stop("Error: No suitable grouping column found. Please specify 'group' manually.")
+    }
+    
+    group <- potential_group
+  }
+  
+  # Load color function if needed
+  if (!exists("fxx.get_many_color")) {
+    if (!file.exists(file.path(root_path, code_folder, "fxx.get_many_color.R"))) {
+      stop("Error: fxx.get_many_color.R not found. Please check the file path.")
+    }
+    source(file.path(root_path, code_folder, "fxx.get_many_color.R"))
+  }
+  
+  # Generate colors automatically if not provided
+  if (is.null(mycol)) {
+    n_groups <- length(unique(tsne_data[[group]]))
+    if (n_groups > 100) {
+      stop("Error: Too many groups (>100). Please specify 'mycol' manually.")
+    }
+    mycol <- fxx.get_many_color(n_groups)
+  }
+  
+  plot_list <- list()
+  
+  # Check grouping column
+  if (!group %in% colnames(tsne_data)) {
+    stop(paste("Error: Group column", group, "not found in the data."))
+  }
+  
+  mytheme <- theme_bw() +
+    theme(
+      legend.title = element_blank(),
+      legend.position = "right",
+      panel.grid.major = element_blank(),
+      panel.grid.minor = element_blank(),
+      panel.background = element_blank()
+    )
+  
+  # Base scatter plot
+  p <- ggplot(data = tsne_data, aes_string(x = x_col, y = y_col)) +
+    geom_point(size = 2.2) +
+    labs(x = paste0(x_col, "_PC1"), y = paste0(y_col, "_PC2")) +
+    mytheme
+  plot_list[["base"]] <- p
+  
+  # Colored scatter plot
+  p1 <- p +
+    geom_point(size = 2.2, aes_string(col = group)) +
+    scale_color_manual(values = mycol)
+  plot_list[["colored"]] <- p1
+  
+  # Add shapes
+  p2 <- p1 +
+    aes_string(shape = group) +
+    scale_shape_manual(values = 15:(14 + length(mycol)))
+  plot_list[["shaped"]] <- p2
+  
+  # Add confidence ellipses
+  p3 <- p2 +
+    stat_ellipse(aes_string(color = group), level = 0.95, linetype = 2)
+  plot_list[["ellipse"]] <- p3
+  
+  # Filled confidence ellipses
+  p4 <- p2 +
+    stat_ellipse(aes_string(fill = group), level = 0.95, geom = "polygon", alpha = 0.2) +
+    scale_fill_manual(values = mycol)
+  plot_list[["filled_ellipse"]] <- p4
+  
+  # Filled ellipses with borders
+  p5 <- p2 +
+    stat_ellipse(
+      aes_string(fill = group, color = group),
+      level = 0.95,
+      linetype = 2,
+      geom = "polygon",
+      alpha = 0.2
+    ) +
+    scale_fill_manual(values = mycol)
+  plot_list[["filled_bordered_ellipse"]] <- p5
+  
+  # Compute group means
+  formula_str <- paste(paste(x_col, y_col, sep = " + "), group, sep = " ~ ")
+  tsne_mean <- summaryBy(as.formula(formula_str), tsne_data, FUN = mean)
+  tsne <- merge(tsne_data, tsne_mean, by = group)
+  
+  # Firework-style centroid plot
+  p6 <- ggplot(data = tsne, aes_string(x = x_col, y = y_col)) +
+    geom_point(size = 2.2, aes_string(col = group, shape = group)) +
+    scale_shape_manual(values = 15:(14 + length(mycol))) +
+    scale_color_manual(values = mycol) +
+    labs(x = paste0(x_col, "_PC1"), y = paste0(y_col, "_PC2")) +
+    mytheme
+  plot_list[["firework_base"]] <- p6
+  
+  mean_x_col <- paste0(x_col, ".mean")
+  mean_y_col <- paste0(y_col, ".mean")
+  
+  # Connect points to group centroids
+  p7 <- p6 +
+    geom_segment(
+      data = tsne,
+      aes_string(
+        x = mean_x_col,
+        y = mean_y_col,
+        xend = x_col,
+        yend = y_col,
+        color = group
+      ),
+      alpha = 0.6,
+      show.legend = FALSE
+    )
+  plot_list[["firework_centroid"]] <- p7
+  
+  # Firework plot with filled ellipses
+  p8 <- p6 +
+    stat_ellipse(
+      aes_string(fill = group),
+      level = 0.95,
+      show.legend = FALSE,
+      geom = "polygon",
+      alpha = 0.2
+    ) +
+    scale_fill_manual(values = mycol) +
+    geom_segment(
+      data = tsne,
+      aes_string(
+        x = mean_x_col,
+        y = mean_y_col,
+        xend = x_col,
+        yend = y_col,
+        color = group
+      ),
+      alpha = 0.6,
+      show.legend = FALSE
+    )
+  plot_list[["firework_ellipse"]] <- p8
+  
+  return(plot_list)
+}
+
+fxx.plot_pca <- function(pca_data,
+                         group = NULL,
+                         x_col = "PC1",
+                         y_col = "PC2",
+                         mycol = NULL) {
+
+  if (!all(c(x_col, y_col) %in% colnames(pca_data))) {
+    stop("Required columns not found: ", x_col, " and/or ", y_col, call. = FALSE)
+  }
+
+  if (is.null(group)) {
+    other_cols <- setdiff(colnames(pca_data), c(x_col, y_col))
+    pca_data <- pca_data[, c(x_col, y_col, other_cols), drop = FALSE]
+
+    potential_group <- NULL
+    for (col in colnames(pca_data)[3:ncol(pca_data)]) {
+      n_unique <- length(unique(pca_data[[col]]))
+      if (n_unique > 1 && n_unique < nrow(pca_data)) {
+        potential_group <- col
+        break
+      }
+    }
+
+    if (is.null(potential_group)) {
+      stop("No suitable grouping column found. Please specify 'group' manually.", call. = FALSE)
+    }
+
+    group <- potential_group
+    message("Using column '", group, "' as grouping variable. ",
+            "Number of groups: ", length(unique(pca_data[[group]])))
+  }
+
+  if (!group %in% colnames(pca_data)) {
+    stop("Group column not found: ", group, call. = FALSE)
+  }
+
+  if (is.null(mycol)) {
+    n_groups <- length(unique(pca_data[[group]]))
+    if (n_groups > 100) {
+      stop("Too many groups (>100). Please specify 'mycol' manually.", call. = FALSE)
+    }
+    mycol <- fxx.get_many_color(n_groups)
+  }
+
+  plot_list <- list()
+
+  mytheme <- ggplot2::theme_bw() +
+    ggplot2::theme(
+      legend.title = ggplot2::element_blank(),
+      legend.position = "right",
+      panel.grid.major = ggplot2::element_blank(),
+      panel.grid.minor = ggplot2::element_blank(),
+      panel.background = ggplot2::element_blank(),
+      axis.title = ggplot2::element_text(size = 6),
+      axis.text = ggplot2::element_text(size = 6),
+      legend.text = ggplot2::element_text(size = 6),
+      plot.title = ggplot2::element_text(size = 6),
+      strip.text = ggplot2::element_text(size = 6)
+    )
+
+  p <- ggplot2::ggplot(pca_data, ggplot2::aes(.data[[x_col]], .data[[y_col]])) +
+    ggplot2::geom_point(size = 2.2) +
+    ggplot2::labs(x = x_col, y = y_col) +
+    mytheme
+  plot_list[["base"]] <- p
+
+  p1 <- p +
+    ggplot2::geom_point(ggplot2::aes(color = .data[[group]]), size = 2.2) +
+    ggplot2::scale_color_manual(values = mycol)
+  plot_list[["colored"]] <- p1
+
+  p2 <- p1 +
+    ggplot2::aes(shape = .data[[group]]) +
+    ggplot2::scale_shape_manual(values = 15:(14 + length(mycol)))
+  plot_list[["shaped"]] <- p2
+
+  p3 <- p2 +
+    ggplot2::stat_ellipse(ggplot2::aes(color = .data[[group]]), level = 0.95, linetype = 2)
+  plot_list[["ellipse"]] <- p3
+
+  p4 <- p2 +
+    ggplot2::stat_ellipse(ggplot2::aes(fill = .data[[group]]), level = 0.95,
+                          geom = "polygon", alpha = 0.2) +
+    ggplot2::scale_fill_manual(values = mycol)
+  plot_list[["filled_ellipse"]] <- p4
+
+  p5 <- p2 +
+    ggplot2::stat_ellipse(ggplot2::aes(fill = .data[[group]], color = .data[[group]]),
+                          level = 0.95, linetype = 2, geom = "polygon", alpha = 0.2) +
+    ggplot2::scale_fill_manual(values = mycol)
+  plot_list[["filled_bordered_ellipse"]] <- p5
+
+  formula_str <- paste(paste(x_col, y_col, sep = " + "), group, sep = " ~ ")
+  pca_mean <- doBy::summaryBy(stats::as.formula(formula_str), data = pca_data, FUN = mean)
+  pca <- merge(pca_data, pca_mean, by = group)
+
+  mean_x_col <- paste0(x_col, ".mean")
+  mean_y_col <- paste0(y_col, ".mean")
+
+  p6 <- ggplot2::ggplot(pca, ggplot2::aes(.data[[x_col]], .data[[y_col]])) +
+    ggplot2::geom_point(ggplot2::aes(color = .data[[group]], shape = .data[[group]]), size = 2.2) +
+    ggplot2::scale_shape_manual(values = 15:(14 + length(mycol))) +
+    ggplot2::scale_color_manual(values = mycol) +
+    ggplot2::labs(x = x_col, y = y_col) +
+    mytheme
+  plot_list[["firework_base"]] <- p6
+
+  p7 <- p6 +
+    ggplot2::geom_segment(
+      data = pca,
+      ggplot2::aes(
+        x = .data[[mean_x_col]], y = .data[[mean_y_col]],
+        xend = .data[[x_col]], yend = .data[[y_col]], color = .data[[group]]
+      ),
+      alpha = 0.6, show.legend = FALSE
+    )
+  plot_list[["firework_centroid"]] <- p7
+
+  p8 <- p6 +
+    ggplot2::stat_ellipse(
+      ggplot2::aes(fill = .data[[group]]),
+      level = 0.95, show.legend = FALSE, geom = "polygon", alpha = 0.2
+    ) +
+    ggplot2::scale_fill_manual(values = mycol) +
+    ggplot2::geom_segment(
+      data = pca,
+      ggplot2::aes(
+        x = .data[[mean_x_col]], y = .data[[mean_y_col]],
+        xend = .data[[x_col]], yend = .data[[y_col]], color = .data[[group]]
+      ),
+      alpha = 0.6, show.legend = FALSE
+    )
+  plot_list[["firework_ellipse"]] <- p8
+
+  plot_list
+}
+
+
+fxx.plot_umap <- function(umap_data,
+                          group = NULL,
+                          x_col = "UMAP1",
+                          y_col = "UMAP2",
+                          mycol = NULL) {
+
+  if (!all(c(x_col, y_col) %in% colnames(umap_data))) {
+    stop("Required columns not found: ", x_col, " and/or ", y_col, call. = FALSE)
+  }
+
+  if (is.null(group)) {
+    other_cols <- setdiff(colnames(umap_data), c(x_col, y_col))
+    umap_data <- umap_data[, c(x_col, y_col, other_cols), drop = FALSE]
+
+    potential_group <- NULL
+    for (col in colnames(umap_data)[3:ncol(umap_data)]) {
+      n_unique <- length(unique(umap_data[[col]]))
+      if (n_unique > 1 && n_unique < nrow(umap_data)) {
+        potential_group <- col
+        break
+      }
+    }
+
+    if (is.null(potential_group)) {
+      stop("No suitable grouping column found. Please specify 'group' manually.", call. = FALSE)
+    }
+
+    group <- potential_group
+    message("Using column '", group, "' as grouping variable. ",
+            "Number of groups: ", length(unique(umap_data[[group]])))
+  }
+
+  if (!group %in% colnames(umap_data)) {
+    stop("Group column not found: ", group, call. = FALSE)
+  }
+
+  if (is.null(mycol)) {
+    n_groups <- length(unique(umap_data[[group]]))
+    if (n_groups > 100) {
+      stop("Too many groups (>100). Please specify 'mycol' manually.", call. = FALSE)
+    }
+    mycol <- fxx.get_many_color(n_groups)
+  }
+
+  plot_list <- list()
+
+  mytheme <- ggplot2::theme_bw() +
+    ggplot2::theme(
+      legend.title = ggplot2::element_blank(),
+      legend.position = "right",
+      panel.grid.major = ggplot2::element_blank(),
+      panel.grid.minor = ggplot2::element_blank(),
+      panel.background = ggplot2::element_blank(),
+      axis.title = ggplot2::element_text(size = 6),
+      axis.text = ggplot2::element_text(size = 6),
+      legend.text = ggplot2::element_text(size = 6),
+      plot.title = ggplot2::element_text(size = 6),
+      strip.text = ggplot2::element_text(size = 6)
+    )
+
+  p <- ggplot2::ggplot(umap_data, ggplot2::aes(.data[[x_col]], .data[[y_col]])) +
+    ggplot2::geom_point(size = 2.2) +
+    ggplot2::labs(x = x_col, y = y_col) +
+    mytheme
+  plot_list[["base"]] <- p
+
+  p1 <- p +
+    ggplot2::geom_point(ggplot2::aes(color = .data[[group]]), size = 2.2) +
+    ggplot2::scale_color_manual(values = mycol)
+  plot_list[["colored"]] <- p1
+
+  p2 <- p1 +
+    ggplot2::aes(shape = .data[[group]]) +
+    ggplot2::scale_shape_manual(values = 15:(14 + length(mycol)))
+  plot_list[["shaped"]] <- p2
+
+  p3 <- p2 +
+    ggplot2::stat_ellipse(ggplot2::aes(color = .data[[group]]), level = 0.95, linetype = 2)
+  plot_list[["ellipse"]] <- p3
+
+  p4 <- p2 +
+    ggplot2::stat_ellipse(ggplot2::aes(fill = .data[[group]]), level = 0.95,
+                          geom = "polygon", alpha = 0.2) +
+    ggplot2::scale_fill_manual(values = mycol)
+  plot_list[["filled_ellipse"]] <- p4
+
+  p5 <- p2 +
+    ggplot2::stat_ellipse(ggplot2::aes(fill = .data[[group]], color = .data[[group]]),
+                          level = 0.95, linetype = 2, geom = "polygon", alpha = 0.2) +
+    ggplot2::scale_fill_manual(values = mycol)
+  plot_list[["filled_bordered_ellipse"]] <- p5
+
+  formula_str <- paste(paste(x_col, y_col, sep = " + "), group, sep = " ~ ")
+  umap_mean <- doBy::summaryBy(stats::as.formula(formula_str), data = umap_data, FUN = mean)
+  umap <- merge(umap_data, umap_mean, by = group)
+
+  mean_x_col <- paste0(x_col, ".mean")
+  mean_y_col <- paste0(y_col, ".mean")
+
+  p6 <- ggplot2::ggplot(umap, ggplot2::aes(.data[[x_col]], .data[[y_col]])) +
+    ggplot2::geom_point(ggplot2::aes(color = .data[[group]], shape = .data[[group]]), size = 2.2) +
+    ggplot2::scale_shape_manual(values = 15:(14 + length(mycol))) +
+    ggplot2::scale_color_manual(values = mycol) +
+    ggplot2::labs(x = x_col, y = y_col) +
+    mytheme
+  plot_list[["firework_base"]] <- p6
+
+  p7 <- p6 +
+    ggplot2::geom_segment(
+      data = umap,
+      ggplot2::aes(
+        x = .data[[mean_x_col]], y = .data[[mean_y_col]],
+        xend = .data[[x_col]], yend = .data[[y_col]], color = .data[[group]]
+      ),
+      alpha = 0.6, show.legend = FALSE
+    )
+  plot_list[["firework_centroid"]] <- p7
+
+  p8 <- p6 +
+    ggplot2::stat_ellipse(
+      ggplot2::aes(fill = .data[[group]]),
+      level = 0.95, show.legend = FALSE, geom = "polygon", alpha = 0.2
+    ) +
+    ggplot2::scale_fill_manual(values = mycol) +
+    ggplot2::geom_segment(
+      data = umap,
+      ggplot2::aes(
+        x = .data[[mean_x_col]], y = .data[[mean_y_col]],
+        xend = .data[[x_col]], yend = .data[[y_col]], color = .data[[group]]
+      ),
+      alpha = 0.6, show.legend = FALSE
+    )
+  plot_list[["firework_ellipse"]] <- p8
+
+  plot_list
+}
+
+
+
+
+# Output directory
+out_dir <- "RNA-01.PCA/seed27"
+fxx.create_and_setwd(file.path(root_path, res_folder, out_dir))
+# Prepare matrix
+matrix_t <- t(matrix)
+# Color palette
+my_colors <- c(
+  "Unhealthy" = "#8F5F9F",
+  "Healthy" = "#EB9123",
+  "A5B5" = "#315E85"
+)
+# tSNE analysis
+set.seed(27)
+library(Rtsne)
+tsne_out <- Rtsne(matrix_t, dims = 2, perplexity = 2, verbose = TRUE)
+tsne_data <- data.frame(
+  TSNE1 = tsne_out$Y[, 1],
+  TSNE2 = tsne_out$Y[, 2],
+  Group = clinical$Group
+)
+tsne_plots <- fxx.plot_tsne(tsne_data, group = "Group", mycol = my_colors)
+# PCA analysis
+pca_out <- prcomp(matrix_t, scale = TRUE)
+pca_data <- data.frame(
+  PC1 = pca_out$x[, 1],
+  PC2 = pca_out$x[, 2],
+  Group = clinical$Group
+)
+pca_plots <- fxx.plot_pca(pca_data, group = "Group", mycol = my_colors)
+# Save plots
+plot_names <- c(
+  "base", "colored", "shaped", "ellipse",
+  "filled_ellipse", "filled_bordered_ellipse",
+  "firework_base", "firework_centroid", "firework_ellipse"
+)
+for (plot_name in plot_names) {
+  plot_obj <- tsne_plots[[plot_name]]
+  fxx.save_ggplot2_obj2res(
+    final_folder = out_dir,
+    p = plot_obj,
+    p_filename = paste0("tSNE_All_samples_", plot_name),
+    width = 3.4,
+    height = 2.7
+  )
+}
+for (plot_name in plot_names) {
+  plot_obj <- pca_plots[[plot_name]]
+  fxx.save_ggplot2_obj2res(
+    final_folder = out_dir,
+    p = plot_obj,
+    p_filename = paste0("PCA_All_samples_", plot_name),
+    width = 3.4,
+    height = 2.7
+  )
+}
+
+```
+```{r Import differential analysis matrix}
+##============================================================================##
+# Program: Import differential expression results
+##============================================================================##
+library(tidyverse)
+library(readxl)
+library(writexl)
+
+file.path.list <- list(
+  "Healthy_A5B5" = "cow-eukaryotic-transcriptome/result/1.4.different_expressed_gene/A5B5-vs-health/A5B5-vs-health-all.gene.xlsx",
+  "Unhealthy_A5B5" = "cow-eukaryotic-transcriptome/result/1.4.different_expressed_gene/A5B5-vs-unhealth/A5B5-vs-unhealth-all.gene.xlsx",
+  "Healthy_Unhealthy" = "cow-eukaryotic-transcriptome/result/1.4.different_expressed_gene/unhealth-vs-health/unhealth-vs-health-all.gene.xlsx"
+)
+
+setwd(file.path(root_path, data_folder))
+degs_list <- list(
+  "Healthy_A5B5" = read_xlsx(file.path(file.path.list$Healthy_A5B5)) %>%
+    dplyr::select("gene_id", "FoldChange", "log2FoldChange", "p-value", "q-value", "Regulation"),
+  "Unhealthy_A5B5" = read_xlsx(file.path(file.path.list$Unhealthy_A5B5)) %>%
+    dplyr::select("gene_id", "FoldChange", "log2FoldChange", "p-value", "q-value", "Regulation"),
+  "Healthy_Unhealthy" = read_xlsx(file.path(file.path.list$Healthy_Unhealthy)) %>%
+    dplyr::select("gene_id", "FoldChange", "log2FoldChange", "p-value", "q-value", "Regulation")
+)
+
+out_dir <- "RNA-02.DEseq"
+fxx.create_and_setwd(file.path(root_path, res_folder, out_dir))
+saveRDS(degs_list, file = "degs_list.Rds")
+
+setwd(file.path(root_path, res_folder, "RNA-02.DEseq"))
+saveRDS(degs_list, file = "degs_list.Rds")
+
+setwd(file.path(root_path, res_folder, "RNA-02.DEseq"))
+degs_list <- readRDS(file = "degs_list.Rds")
+
+```
+```{r Volcano plot for differential expression analysis}
+##============================================================================##
+# Program: Volcano plot for differential expression analysis
+##============================================================================##
+library(dplyr)
+library(ggplot2)
+library(ggrepel)
+
+setwd(file.path(root_path, res_folder, "RNA-02.DEseq"))
+degs_list <- readRDS(file = "degs_list.Rds")
+
+my_colors <- c(
+  "Unhealthy" = "#8F5F9F",
+  "Healthy" = "#EB9123",
+  "A5B5" = "#315E85"
+)
+
+parse_contrast_ctrl_exp <- function(contrast_name) {
+  parts <- strsplit(contrast_name, "_")[[1]]
+  if (length(parts) != 2) {
+    stop("contrast_name must follow the format Control_Experiment, e.g. Healthy_A5B5: ", contrast_name)
+  }
+  list(control = parts[1], experiment = parts[2])
+}
+
+plot_volcano_for_contrast <- function(list_obj,
+                                      contrast_name,
+                                      gene_col = "gene_id",
+                                      lfc_col  = "log2FoldChange",
+                                      q_col    = "q-value",
+                                      q_thresh = 0.05,
+                                      draw_cut_lines = TRUE) {
+  
+  grp <- parse_contrast_ctrl_exp(contrast_name)
+  control <- grp$control
+  experiment <- grp$experiment
+  
+  if (!control %in% names(my_colors)) {
+    stop("Missing control group color in my_colors: ", control,
+         "\nAvailable keys: ", paste(names(my_colors), collapse = ", "))
+  }
+  if (!experiment %in% names(my_colors)) {
+    stop("Missing experiment group color in my_colors: ", experiment,
+         "\nAvailable keys: ", paste(names(my_colors), collapse = ", "))
+  }
+  
+  df0 <- list_obj[[contrast_name]]
+  if (is.null(df0)) stop("Contrast not found in degs_list: ", contrast_name)
+  
+  need_cols <- c(gene_col, lfc_col, q_col)
+  miss <- setdiff(need_cols, colnames(df0))
+  if (length(miss) > 0) {
+    stop("Missing required columns: ", paste(miss, collapse = ", "),
+         "\nCurrent columns: ", paste(colnames(df0), collapse = ", "))
+  }
+  
+  df <- df0 %>%
+    transmute(
+      gene   = .data[[gene_col]],
+      log2FC = as.numeric(.data[[lfc_col]]),
+      qvalue = as.numeric(.data[[q_col]])
+    ) %>%
+    filter(!is.na(log2FC), !is.na(qvalue)) %>%
+    mutate(
+      significant = qvalue < q_thresh,
+      regulation = case_when(
+        significant & log2FC > 0 ~ "Up",
+        significant & log2FC < 0 ~ "Down",
+        TRUE ~ "NotSig"
+      ),
+      color = case_when(
+        regulation == "Up" ~ unname(my_colors[experiment]),
+        regulation == "Down" ~ unname(my_colors[control]),
+        TRUE ~ "grey80"
+      ),
+      y = -log10(qvalue)
+    )
+  
+  round_down_05 <- function(x) floor(x * 2) / 2
+  round_up_05 <- function(x) ceiling(x * 2) / 2
+  
+  x_min <- min(df$log2FC)
+  x_max <- max(df$log2FC)
+  y_min <- min(df$y)
+  y_max <- max(df$y)
+  
+  if (x_min == x_max) x_min <- x_min - 1e-6
+  if (y_min == y_max) y_max <- y_max + 1e-6
+  
+  x_lim <- c(round_down_05(x_min), round_up_05(x_max))
+  y_lim <- c(round_down_05(y_min), round_up_05(y_max))
+  
+  p <- ggplot(df, aes(x = log2FC, y = y)) +
+    geom_point(aes(color = color), size = 1.5, alpha = 0.8) +
+    scale_color_identity() +
+    labs(
+      x = "Log2 Fold Change (Experiment vs Control)",
+      y = "-Log10(q-value)",
+      title = paste0("Experiment ", experiment, ", Control ", control)
+    ) +
+    coord_cartesian(xlim = x_lim, ylim = y_lim) +
+    theme_minimal() +
+    theme(
+      legend.position = "none",
+      axis.text = element_text(color = "#000000", size = 6),
+      axis.title = element_text(color = "#000000", size = 6),
+      plot.title = element_text(size = 6, face = "bold"),
+      panel.grid = element_blank(),
+      panel.border = element_rect(color = "black", fill = NA, linewidth = 0.75),
+      panel.background = element_rect(fill = "white", colour = NA)
+    )
+  
+  if (draw_cut_lines) {
+    p <- p +
+      geom_vline(xintercept = 0, linetype = "dashed", color = "black", linewidth = 0.75) +
+      geom_hline(yintercept = -log10(q_thresh), linetype = "dashed", color = "black", linewidth = 0.75)
+  }
+  
+  p
+}
+
+p1 <- plot_volcano_for_contrast(degs_list, "Healthy_A5B5", draw_cut_lines = TRUE)
+p2 <- plot_volcano_for_contrast(degs_list, "Unhealthy_A5B5", draw_cut_lines = TRUE)
+p3 <- plot_volcano_for_contrast(degs_list, "Healthy_Unhealthy", draw_cut_lines = TRUE)
+
+p1.NoVline <- plot_volcano_for_contrast(degs_list, "Healthy_A5B5", draw_cut_lines = FALSE)
+p2.NoVline <- plot_volcano_for_contrast(degs_list, "Unhealthy_A5B5", draw_cut_lines = FALSE)
+p3.NoVline <- plot_volcano_for_contrast(degs_list, "Healthy_Unhealthy", draw_cut_lines = FALSE)
+
+out_dir <- "RNA-02.DEseq-VolPlot"
+fxx.create_and_setwd(file.path(root_path, res_folder, out_dir))
+
+```
+```{r DEGs intersection}
+##============================================================================##
+# Program: Intersection of DEGs
+##============================================================================##
+setwd(file.path(root_path, res_folder, "RNA-02.DEseq"))
+degs_list <- readRDS(file = "degs_list.Rds")
+
+common_high_in_disease <-   intersect(
+  # 治疗后下降（相较于疾病组）
+  degs_list$Unhealthy_A5B5 %>%
+    dplyr::filter(log2FoldChange < 0, `q-value`<0.05) %>%
+    dplyr::pull(gene_id),
+  # 疾病组中上调（相较于健康组）
+  degs_list$Healthy_Unhealthy %>%
+    dplyr::filter(log2FoldChange > 0, `q-value`<0.05) %>%
+    dplyr::pull(gene_id)
+  )
+
+length(common_high_in_disease)
+
+out_dir <- "RNA-03.1.Unhealthy_activation_degs"
+fxx.create_and_setwd(file.path(root_path, res_folder, out_dir))
+write_xlsx(common_high_in_disease %>% data.frame("genes" = .), path = "common_high_in_disease.genes.xlsx")
+saveRDS(common_high_in_disease, file = "common_high_in_disease.genes.Rds")
+```
+```{r Intersected DEGs pathway enrichment analysis}
+##============================================================================##
+# Program: Intersection gene enrichment analysis
+##============================================================================##
+
+library(tidyverse)
+library(readxl)
+library(writexl)
+library(clusterProfiler)
+library(org.Bt.eg.db)
+library(enrichplot)
+library(dplyr)
+library(ggplot2)
+library(openxlsx)
+
+# Load target genes
+setwd(file.path(root_path, res_folder, "RNA-03.1.Unhealthy_activation_degs"))
+common_high_in_disease <- readRDS(file = "common_high_in_disease.genes.Rds")
+target_genes <- common_high_in_disease
+
+# Optional example gene list
+target_genes <- c(
+  "ACOD1","ACSL6","ADA2","ADAM8","ADAMTS17","ADAMTS4","ADAP1","AOAH",
+  "APLNR","AQP9","ARHGAP30","ARHGAP4","ART3","BCL3","BGN","BHLHE40",
+  "BICC1","BST1","C1RL","C1S","C2","C3","C3H1orf162","C4A","C4BPA",
+  "C5AR1","C6","CBLN3","CCL19","CCL2","CCL8","CCR1","CD14","CD163",
+  "CD300A","CD37","CD40","CD86","CD93","CDH5"
+)
+
+# Convert SYMBOL to ENTREZID
+gene_df <- bitr(
+  target_genes,
+  fromType = "SYMBOL",
+  toType   = "ENTREZID",
+  OrgDb    = org.Bt.eg.db
+)
+
+gene_entrez <- unique(gene_df$ENTREZID)
+
+# GO enrichment analysis
+ego_bp <- enrichGO(
+  gene_entrez,
+  OrgDb = org.Bt.eg.db,
+  keyType = "ENTREZID",
+  ont = "BP",
+  pAdjustMethod = "BH",
+  pvalueCutoff = 0.05,
+  qvalueCutoff = 0.2,
+  readable = TRUE
+)
+
+ego_cc <- enrichGO(
+  gene_entrez,
+  OrgDb = org.Bt.eg.db,
+  keyType = "ENTREZID",
+  ont = "CC",
+  pAdjustMethod = "BH",
+  pvalueCutoff = 0.05,
+  qvalueCutoff = 0.2,
+  readable = TRUE
+)
+
+ego_mf <- enrichGO(
+  gene_entrez,
+  OrgDb = org.Bt.eg.db,
+  keyType = "ENTREZID",
+  ont = "MF",
+  pAdjustMethod = "BH",
+  pvalueCutoff = 0.05,
+  qvalueCutoff = 0.2,
+  readable = TRUE
+)
+
+# Convert results to data frames
+df_bp <- as.data.frame(ego_bp) %>% mutate(ONTOLOGY = "BP")
+df_cc <- as.data.frame(ego_cc) %>% mutate(ONTOLOGY = "CC")
+df_mf <- as.data.frame(ego_mf) %>% mutate(ONTOLOGY = "MF")
+
+df_all <- bind_rows(df_bp, df_cc, df_mf) %>%
+  arrange(p.adjust, pvalue)
+
+# Export results to Excel
+out_xlsx <- "GO_enrichment_results.xlsx"
+
+wb <- createWorkbook()
+
+addWorksheet(wb, "BP")
+addWorksheet(wb, "CC")
+addWorksheet(wb, "MF")
+addWorksheet(wb, "all")
+
+writeData(wb, "BP", df_bp)
+writeData(wb, "CC", df_cc)
+writeData(wb, "MF", df_mf)
+writeData(wb, "all", df_all)
+
+for (sh in c("BP", "CC", "MF", "all")) {
+  addFilter(wb, sh, rows = 1, cols = 1:ncol(readWorkbook(wb, sheet = sh, rows = 1)))
+  freezePane(wb, sh, firstRow = TRUE)
+  setColWidths(wb, sh, cols = 1:50, widths = "auto")
+}
+
+saveWorkbook(wb, out_xlsx, overwrite = TRUE)
+```
+
+```{r TCSeq cluster analysis}
+##============================================================================##
+# Program: TCseq
+##============================================================================##
+
+# Load expression matrix and clinical metadata
+setwd(file.path(root_path, res_folder, "RNA-01.Exp,DEGs"))
+matrix <- readRDS("matrix_Log2FPKM.Rds")
+clinical <- readRDS("clinical.Rds") %>%
+  mutate(Group = group)
+
+clinical$group <- factor(clinical$group, levels = c("Healthy", "Unhealthy", "A5B5"))
+clinical$Group <- factor(clinical$Group, levels = c("Healthy", "Unhealthy", "A5B5"))
+
+# Set output directory
+out_dir <- "RNA-05-1.TCseq"
+fxx.create_and_setwd(file.path(root_path, res_folder, out_dir))
+
+# Ensure matrix columns follow the sample order in clinical
+matrix <- matrix[, clinical$samples]
+
+# Average expression within each group
+unique_groups <- levels(clinical$group)
+mean_matrix <- matrix(0, nrow = nrow(matrix), ncol = length(unique_groups))
+rownames(mean_matrix) <- rownames(matrix)
+colnames(mean_matrix) <- unique_groups
+
+for (group in unique_groups) {
+  group_samples <- clinical$samples[clinical$group == group]
+  mean_matrix[, group] <- rowMeans(matrix[, group_samples])
+}
+
+matrix_mean <- mean_matrix
+
+# Custom color palette
+custom_colors <- c("#224263", "#3D77B1", "#759AD5", "#F5F4F8", "#D27890", "#99334D", "#682234")
+
+# Load required packages
+library(tidyverse)
+library(TCseq)
+library(RColorBrewer)
+
+# TCseq clustering for k = 2 to 10
+set.seed(11)
+data <- as.matrix(matrix_mean)
+
+tca_results <- list()
+cluster_proteininfo_list <- list()
+
+for (k_value in 2:10) {
+  tca_results[[k_value]] <- timeclust(
+    x = data,
+    algo = "cm",
+    k = k_value,
+    standardize = TRUE
+  )
+
+  p <- timeclustplot(tca_results[[k_value]], categories = "Treatment", cols = 3)
+  p1 <- timeclustplot(
+    tca_results[[k_value]],
+    categories = "Treatment",
+    cols = 3,
+    membership.color = colorRampPalette(brewer.pal(11, "PiYG"))(11)
+  )
+  p2 <- timeclustplot(
+    tca_results[[k_value]],
+    categories = "Treatment",
+    cols = 3,
+    membership.color = colorRampPalette(custom_colors)(11)
+  )
+
+  cluster_proteininfo_list[[k_value]] <- clustCluster(tca_results[[k_value]])
+
+  sub_dir <- file.path(out_dir, paste0("cluster=", k_value))
+  fxx.create_and_setwd(file.path(root_path, res_folder, sub_dir))
+
+  saveRDS(
+    cluster_proteininfo_list[[k_value]],
+    paste0("TCseq_proteininfo.k", k_value, ".Rds")
+  )
+
+  writexl::write_xlsx(
+    data.frame(
+      protein = names(cluster_proteininfo_list[[k_value]]),
+      cluster = cluster_proteininfo_list[[k_value]]
+    ),
+    paste0("TCseq_proteininfo.k", k_value, ".xlsx")
+  )
+
+  for (i in 1:k_value) {
+    fxx.save_ggplot2_obj2res(
+      final_folder = sub_dir,
+      p_filename = str_c("TCseq_clusterplot_k", k_value, "_cluster", i, ".col-0"),
+      p = p[[i]],
+      height = 3,
+      width = 4.6,
+      dpi = 600
+    )
+    fxx.save_ggplot2_obj2res(
+      final_folder = sub_dir,
+      p_filename = str_c("TCseq_clusterplot_k", k_value, "_cluster", i, ".col-1"),
+      p = p1[[i]],
+      height = 3,
+      width = 4.6,
+      dpi = 600
+    )
+    fxx.save_ggplot2_obj2res(
+      final_folder = sub_dir,
+      p_filename = str_c("TCseq_clusterplot_k", k_value, "_cluster", i, ".col-2"),
+      p = p2[[i]],
+      height = 3,
+      width = 4.6,
+      dpi = 600
+    )
+  }
+}
+
+# Save all results
+sub_dir <- file.path(out_dir, "all_k_results")
+fxx.create_and_setwd(file.path(root_path, res_folder, sub_dir))
+saveRDS(tca_results, "all_tca_results.Rds")
+saveRDS(cluster_proteininfo_list, "all_cluster_proteininfo.Rds")
+
+
+##---------------------------------------------------------------------------##
+# Program: Re-plot TCseq results for k = 6 with updated color palette
+##---------------------------------------------------------------------------##
+
+library(tidyverse)
+library(TCseq)
+
+out_dir <- "RNA-05-1.TCseq"
+all_results_dir <- file.path(root_path, res_folder, out_dir, "all_k_results")
+
+tca_results <- readRDS(file.path(all_results_dir, "all_tca_results.Rds"))
+tca_k6 <- tca_results[[6]]
+
+custom_colors <- c("#224263", "#3D77B1", "#759AD5", "#F5F4F8", "#D27890", "#99334D", "#682234")
+
+p2 <- timeclustplot(
+  tca_k6,
+  categories = "Treatment",
+  cols = 3,
+  membership.color = colorRampPalette(custom_colors)(11)
+)
+
+k_value <- 6
+sub_dir <- file.path(out_dir, paste0("cluster=", k_value))
+fxx.create_and_setwd(file.path(root_path, res_folder, sub_dir))
+
+for (i in 1:k_value) {
+  fxx.save_ggplot2_obj2res(
+    final_folder = sub_dir,
+    p_filename = str_c("TCseq_clusterplot_k", k_value, "_cluster", i, ".col-2"),
+    p = p2[[i]],
+    height = 3,
+    width = 4.6,
+    dpi = 600
+  )
+}
+```
+```{r Pathway enrichment analysis of  TCseq cluster 2 and cluster 5}
+##============================================================================##
+# Program: GO enrichment analysis for TCseq k=5 Cluster 2 and Cluster 5
+##============================================================================##
+
+library(tidyverse)
+library(clusterProfiler)
+library(org.Bt.eg.db)
+library(enrichplot)
+library(dplyr)
+library(ggplot2)
+library(openxlsx)
+
+# Load k=5 clustering results
+out_dir <- "RNA-05-1.TCseq"
+k5_dir <- file.path(root_path, res_folder, out_dir, "cluster=5")
+
+cluster_info <- readRDS(file.path(k5_dir, "TCseq_proteininfo.k5.Rds"))
+
+# Extract proteins from Cluster 2 and Cluster 5
+c2 <- names(cluster_info)[cluster_info == 2]
+c5 <- names(cluster_info)[cluster_info == 5]
+
+# GO enrichment for c2
+out_dir <- "RNA-05-2.TCseq(k5).Disease_high_GO.enrich"
+fxx.create_and_setwd(file.path(root_path, res_folder, out_dir))
+
+target_genes <- c2
+
+# SYMBOL -> ENTREZID
+gene_df <- bitr(
+  target_genes,
+  fromType = "SYMBOL",
+  toType   = "ENTREZID",
+  OrgDb    = org.Bt.eg.db
+)
+
+gene_entrez <- unique(gene_df$ENTREZID)
+
+ego_bp <- enrichGO(
+  gene_entrez, OrgDb = org.Bt.eg.db, keyType = "ENTREZID",
+  ont = "BP", pAdjustMethod = "BH", pvalueCutoff = 0.05, qvalueCutoff = 0.2,
+  readable = TRUE
+)
+
+ego_cc <- enrichGO(
+  gene_entrez, OrgDb = org.Bt.eg.db, keyType = "ENTREZID",
+  ont = "CC", pAdjustMethod = "BH", pvalueCutoff = 0.05, qvalueCutoff = 0.2,
+  readable = TRUE
+)
+
+ego_mf <- enrichGO(
+  gene_entrez, OrgDb = org.Bt.eg.db, keyType = "ENTREZID",
+  ont = "MF", pAdjustMethod = "BH", pvalueCutoff = 0.05, qvalueCutoff = 0.2,
+  readable = TRUE
+)
+
+df_bp <- as.data.frame(ego_bp) %>% mutate(ONTOLOGY = "BP")
+df_cc <- as.data.frame(ego_cc) %>% mutate(ONTOLOGY = "CC")
+df_mf <- as.data.frame(ego_mf) %>% mutate(ONTOLOGY = "MF")
+
+df_all <- bind_rows(df_bp, df_cc, df_mf) %>%
+  arrange(p.adjust, pvalue)
+
+out_xlsx <- "GO_enrichment_results(disease_high_genes).xlsx"
+
+wb <- createWorkbook()
+
+addWorksheet(wb, "BP")
+addWorksheet(wb, "CC")
+addWorksheet(wb, "MF")
+addWorksheet(wb, "all")
+
+writeData(wb, "BP", df_bp)
+writeData(wb, "CC", df_cc)
+writeData(wb, "MF", df_mf)
+writeData(wb, "all", df_all)
+
+for (sh in c("BP", "CC", "MF", "all")) {
+  addFilter(wb, sh, rows = 1, cols = 1:ncol(readWorkbook(wb, sheet = sh, rows = 1)))
+  freezePane(wb, sh, firstRow = TRUE)
+  setColWidths(wb, sh, cols = 1:50, widths = "auto")
+}
+
+saveWorkbook(wb, out_xlsx, overwrite = TRUE)
+
+# GO enrichment for c5
+out_dir <- "RNA-05-2.TCseq(k5).Disease_low_GO.enrich"
+target_genes <- c5
+fxx.create_and_setwd(file.path(root_path, res_folder, out_dir))
+
+# SYMBOL -> ENTREZID
+gene_df <- bitr(
+  target_genes,
+  fromType = "SYMBOL",
+  toType   = "ENTREZID",
+  OrgDb    = org.Bt.eg.db
+)
+
+gene_entrez <- unique(gene_df$ENTREZID)
+
+ego_bp <- enrichGO(
+  gene_entrez, OrgDb = org.Bt.eg.db, keyType = "ENTREZID",
+  ont = "BP", pAdjustMethod = "BH", pvalueCutoff = 0.05, qvalueCutoff = 0.2,
+  readable = TRUE
+)
+
+ego_cc <- enrichGO(
+  gene_entrez, OrgDb = org.Bt.eg.db, keyType = "ENTREZID",
+  ont = "CC", pAdjustMethod = "BH", pvalueCutoff = 0.05, qvalueCutoff = 0.2,
+  readable = TRUE
+)
+
+ego_mf <- enrichGO(
+  gene_entrez, OrgDb = org.Bt.eg.db, keyType = "ENTREZID",
+  ont = "MF", pAdjustMethod = "BH", pvalueCutoff = 0.05, qvalueCutoff = 0.2,
+  readable = TRUE
+)
+
+df_bp <- as.data.frame(ego_bp) %>% mutate(ONTOLOGY = "BP")
+df_cc <- as.data.frame(ego_cc) %>% mutate(ONTOLOGY = "CC")
+df_mf <- as.data.frame(ego_mf) %>% mutate(ONTOLOGY = "MF")
+
+df_all <- bind_rows(df_bp, df_cc, df_mf) %>%
+  arrange(p.adjust, pvalue)
+
+out_xlsx <- "GO_enrichment_results(disease_low_genes).xlsx"
+
+wb <- createWorkbook()
+
+addWorksheet(wb, "BP")
+addWorksheet(wb, "CC")
+addWorksheet(wb, "MF")
+addWorksheet(wb, "all")
+
+writeData(wb, "BP", df_bp)
+writeData(wb, "CC", df_cc)
+writeData(wb, "MF", df_mf)
+writeData(wb, "all", df_all)
+
+for (sh in c("BP", "CC", "MF", "all")) {
+  addFilter(wb, sh, rows = 1, cols = 1:ncol(readWorkbook(wb, sheet = sh, rows = 1)))
+  freezePane(wb, sh, firstRow = TRUE)
+  setColWidths(wb, sh, cols = 1:50, widths = "auto")
+}
+
+saveWorkbook(wb, out_xlsx, overwrite = TRUE)
+```
+
+```{r TCSeq: ssGSEA pathway scoring}
+##============================================================================##
+# Program: GO enrichment analysis for TCseq k=5 Cluster 2 and Cluster 5
+##============================================================================##
+
+library(tidyverse)
+library(clusterProfiler)
+library(org.Bt.eg.db)
+library(enrichplot)
+library(dplyr)
+library(ggplot2)
+library(openxlsx)
+
+# Load k=5 clustering results
+out_dir <- "RNA-05-1.TCseq"
+k5_dir <- file.path(root_path, res_folder, out_dir, "cluster=5")
+
+cluster_info <- readRDS(file.path(k5_dir, "TCseq_proteininfo.k5.Rds"))
+
+# Extract proteins from Cluster 2 and Cluster 5
+c2 <- names(cluster_info)[cluster_info == 2]
+c5 <- names(cluster_info)[cluster_info == 5]
+
+# GO enrichment for c2
+out_dir <- "RNA-05-2.TCseq(k5).Disease_high_GO.enrich"
+fxx.create_and_setwd(file.path(root_path, res_folder, out_dir))
+
+target_genes <- c2
+
+# SYMBOL -> ENTREZID
+gene_df <- bitr(
+  target_genes,
+  fromType = "SYMBOL",
+  toType   = "ENTREZID",
+  OrgDb    = org.Bt.eg.db
+)
+
+gene_entrez <- unique(gene_df$ENTREZID)
+
+ego_bp <- enrichGO(
+  gene_entrez, OrgDb = org.Bt.eg.db, keyType = "ENTREZID",
+  ont = "BP", pAdjustMethod = "BH", pvalueCutoff = 0.05, qvalueCutoff = 0.2,
+  readable = TRUE
+)
+
+ego_cc <- enrichGO(
+  gene_entrez, OrgDb = org.Bt.eg.db, keyType = "ENTREZID",
+  ont = "CC", pAdjustMethod = "BH", pvalueCutoff = 0.05, qvalueCutoff = 0.2,
+  readable = TRUE
+)
+
+ego_mf <- enrichGO(
+  gene_entrez, OrgDb = org.Bt.eg.db, keyType = "ENTREZID",
+  ont = "MF", pAdjustMethod = "BH", pvalueCutoff = 0.05, qvalueCutoff = 0.2,
+  readable = TRUE
+)
+
+df_bp <- as.data.frame(ego_bp) %>% mutate(ONTOLOGY = "BP")
+df_cc <- as.data.frame(ego_cc) %>% mutate(ONTOLOGY = "CC")
+df_mf <- as.data.frame(ego_mf) %>% mutate(ONTOLOGY = "MF")
+
+df_all <- bind_rows(df_bp, df_cc, df_mf) %>%
+  arrange(p.adjust, pvalue)
+
+out_xlsx <- "GO_enrichment_results(disease_high_genes).xlsx"
+
+wb <- createWorkbook()
+
+addWorksheet(wb, "BP")
+addWorksheet(wb, "CC")
+addWorksheet(wb, "MF")
+addWorksheet(wb, "all")
+
+writeData(wb, "BP", df_bp)
+writeData(wb, "CC", df_cc)
+writeData(wb, "MF", df_mf)
+writeData(wb, "all", df_all)
+
+for (sh in c("BP", "CC", "MF", "all")) {
+  addFilter(wb, sh, rows = 1, cols = 1:ncol(readWorkbook(wb, sheet = sh, rows = 1)))
+  freezePane(wb, sh, firstRow = TRUE)
+  setColWidths(wb, sh, cols = 1:50, widths = "auto")
+}
+
+saveWorkbook(wb, out_xlsx, overwrite = TRUE)
+
+# GO enrichment for c5
+out_dir <- "RNA-05-2.TCseq(k5).Disease_low_GO.enrich"
+target_genes <- c5
+fxx.create_and_setwd(file.path(root_path, res_folder, out_dir))
+
+# SYMBOL -> ENTREZID
+gene_df <- bitr(
+  target_genes,
+  fromType = "SYMBOL",
+  toType   = "ENTREZID",
+  OrgDb    = org.Bt.eg.db
+)
+
+gene_entrez <- unique(gene_df$ENTREZID)
+
+ego_bp <- enrichGO(
+  gene_entrez, OrgDb = org.Bt.eg.db, keyType = "ENTREZID",
+  ont = "BP", pAdjustMethod = "BH", pvalueCutoff = 0.05, qvalueCutoff = 0.2,
+  readable = TRUE
+)
+
+ego_cc <- enrichGO(
+  gene_entrez, OrgDb = org.Bt.eg.db, keyType = "ENTREZID",
+  ont = "CC", pAdjustMethod = "BH", pvalueCutoff = 0.05, qvalueCutoff = 0.2,
+  readable = TRUE
+)
+
+ego_mf <- enrichGO(
+  gene_entrez, OrgDb = org.Bt.eg.db, keyType = "ENTREZID",
+  ont = "MF", pAdjustMethod = "BH", pvalueCutoff = 0.05, qvalueCutoff = 0.2,
+  readable = TRUE
+)
+
+df_bp <- as.data.frame(ego_bp) %>% mutate(ONTOLOGY = "BP")
+df_cc <- as.data.frame(ego_cc) %>% mutate(ONTOLOGY = "CC")
+df_mf <- as.data.frame(ego_mf) %>% mutate(ONTOLOGY = "MF")
+
+df_all <- bind_rows(df_bp, df_cc, df_mf) %>%
+  arrange(p.adjust, pvalue)
+
+out_xlsx <- "GO_enrichment_results(disease_low_genes).xlsx"
+
+wb <- createWorkbook()
+
+addWorksheet(wb, "BP")
+addWorksheet(wb, "CC")
+addWorksheet(wb, "MF")
+addWorksheet(wb, "all")
+
+writeData(wb, "BP", df_bp)
+writeData(wb, "CC", df_cc)
+writeData(wb, "MF", df_mf)
+writeData(wb, "all", df_all)
+
+for (sh in c("BP", "CC", "MF", "all")) {
+  addFilter(wb, sh, rows = 1, cols = 1:ncol(readWorkbook(wb, sheet = sh, rows = 1)))
+  freezePane(wb, sh, firstRow = TRUE)
+  setColWidths(wb, sh, cols = 1:50, widths = "auto")
+}
+
+saveWorkbook(wb, out_xlsx, overwrite = TRUE)
+```

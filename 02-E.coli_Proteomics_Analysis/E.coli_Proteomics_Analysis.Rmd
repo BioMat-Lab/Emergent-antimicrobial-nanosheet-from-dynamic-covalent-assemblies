@@ -1,0 +1,1224 @@
+```{r Protein abundance readout}
+setwd(file.path(root_path, res_folder, "Protein.01.matirx+cli.format"))
+# Import Protein expression ($Accession 为 Uniport ID)
+expression_data <- readxl::read_xlsx("mat(Protein quantitation - Only E.Coli).xlsx")
+# clinical Obj
+cli <- data.frame(
+  "samples" = c("PBS-1", "PBS-2", "PBS-3",
+                "CHX1-1", "CHX1-2", "CHX1-3",
+                "AB5-1", "AB5-2", "AB5-3"), 
+  "group" = c(rep("PBS", 3), rep("CHX", 3), rep("A5B5", 3))
+)
+
+#===== build matrix (only keep Gene Name + sample columns) =====#
+keep_cols <- c("Gene Name", cli$samples) %>% intersect(colnames(expression_data))
+matrix <- expression_data %>%
+  dplyr::select(all_of(keep_cols)) %>%
+  dplyr::filter(!is.na(`Gene Name`), `Gene Name` != "") %>%
+  dplyr::distinct(`Gene Name`, .keep_all = TRUE) %>%
+  tidyr::drop_na() %>%
+  tibble::column_to_rownames("Gene Name") %>%
+  mutate(across(everything(), as.numeric)) %>%
+  as.matrix()
+matrix_log <- log2(matrix + 1)
+
+min(matrix_log)
+max(matrix_log)
+
+fxx.create_and_setwd(file.path(root_path, res_folder, "Protein.01.matirx+cli.format"))
+saveRDS(cli, file = "clinical.Rds")
+saveRDS(matrix, file = "matrix.Rds")
+```
+```{r E.Coli Protein filter}
+##============================================================================##
+# Program: Extract E. coli proteins from protein quantitation matrix
+##============================================================================##
+setwd(file.path(root_path, data_folder, "./DZLM2023051322-b1/result/2.Qualitative"))
+mat <- readxl::read_xlsx("Protein quantitation.xlsx")
+
+species_df <- mat$Description %>%
+  stringr::str_extract("(?<=OS=).+?(?= OX=)") %>%
+  tibble::tibble(OS = .) %>%
+  dplyr::count(OS, name = "Freq", sort = TRUE) %>%
+  as.data.frame()
+
+fxx.create_and_setwd(file.path(root_path, res_folder, "Protein.01.matrix+cli.format"))
+writexl::write_xlsx(species_df, "Protein_species_table_statistics.xlsx")
+
+mat <- mat %>%
+  dplyr::mutate(species = stringr::str_extract(Description, "(?<=OS=).+?(?= OX=)"))
+
+library(dplyr)
+library(stringr)
+
+mat_ec <- dplyr::filter(mat, stringr::str_detect(species, "Escherichia coli"))
+
+library(clusterProfiler)
+library(org.EcK12.eg.db)
+library(dplyr)
+
+gene_entrez <- bitr(
+  mat_ec$`Gene Name`,
+  fromType = "SYMBOL",
+  toType = "ENTREZID",
+  OrgDb = org.EcK12.eg.db
+) %>%
+  dplyr::distinct(ENTREZID, .keep_all = TRUE)
+
+rownames(gene_entrez) <- gene_entrez$SYMBOL
+
+mat_ec <- mat_ec %>%
+  dplyr::mutate(ENTREZID = gene_entrez[mat_ec$`Gene Name`, "ENTREZID"])
+
+fxx.create_and_setwd(file.path(root_path, res_folder, "Protein.01.matrix+cli.format"))
+saveRDS(mat_ec, "mat_Protein_quantitation_only_Ecoli.Rds")
+writexl::write_xlsx(mat_ec, path = "mat_Protein_quantitation_only_Ecoli.xlsx")
+```
+```{r Import the differential protein analysis table of E.coli samples}
+##============================================================================##
+# Program: Import and save protein differential expression data
+##============================================================================##
+library(readxl)
+library(tidyverse)
+
+tar_folder <- "./Protein/DZLM2023051322-b1/result/4.Different_expression"
+setwd(file.path(root_path, data_folder, tar_folder))
+
+deps_list_origin <- list(
+  "A5B5_vs_CHX" = read_xlsx("Differential_expression_matrix_unfiltered.xlsx", sheet = "CHX1-vs-AB5"),
+  "PBS_vs_A5B5" = read_xlsx("Differential_expression_matrix_unfiltered.xlsx", sheet = "AB5-vs-PBS"),
+  "PBS_vs_CHX"  = read_xlsx("Differential_expression_matrix_unfiltered.xlsx", sheet = "CHX1-vs-PBS"),
+  "CHX_vs_A5B5" = data.frame()
+)
+
+# Reverse comparison direction and swap average columns
+deps_list_origin[["CHX_vs_A5B5"]] <- deps_list_origin[["A5B5_vs_CHX"]] %>%
+  as_tibble() %>%
+  mutate(
+    log2FoldChange = -log2FoldChange,
+    FoldChange = 1 / FoldChange,
+    Regulation = case_when(
+      Regulation == "Up" ~ "Down",
+      Regulation == "Down" ~ "Up",
+      TRUE ~ Regulation
+    )
+  ) %>%
+  rename_with(~ "Average_tmp__AB5", matches("^Average\\(AB5\\)$")) %>%
+  rename_with(~ "Average(AB5)", matches("^Average\\(CHX1\\)$")) %>%
+  rename_with(~ "Average(CHX1)", matches("^Average_tmp__AB5$")) %>%
+  relocate(`Average(CHX1)`, .after = `Score Sequest HT: Sequest HT`) %>%
+  relocate(`Average(AB5)`, .after = `Average(CHX1)`) %>%
+  as.data.frame()
+
+deps_list <- list(
+  "CHX_vs_A5B5" = deps_list_origin$CHX_vs_A5B5 %>%
+    dplyr::select(
+      "Gene Name",
+      "Average(CHX1)", "Average(AB5)",
+      "log2FoldChange", "FoldChange", "Regulation",
+      "p-value", "q-value"
+    ),
+  "PBS_vs_A5B5" = deps_list_origin$PBS_vs_A5B5 %>%
+    dplyr::select(
+      "Gene Name",
+      "Average(PBS)", "Average(AB5)",
+      "log2FoldChange", "FoldChange", "Regulation",
+      "p-value", "q-value"
+    ),
+  "PBS_vs_CHX" = deps_list_origin$PBS_vs_CHX %>%
+    dplyr::select(
+      "Gene Name",
+      "Average(PBS)", "Average(CHX1)",
+      "log2FoldChange", "FoldChange", "Regulation",
+      "p-value", "q-value"
+    )
+)
+
+# Filter significant differential proteins
+sig_deps_list <- imap(deps_list, ~ {
+  x <- .x
+  if (is.null(x) || nrow(x) == 0) {
+    return(tibble())
+  }
+  x %>% dplyr::filter(`q-value` < 0.05)
+})
+
+# Intersect downregulated genes in both comparisons
+genes_down_both <- intersect(
+  sig_deps_list$CHX_vs_A5B5 %>%
+    dplyr::filter(Regulation == "Down") %>%
+    dplyr::pull("Gene Name"),
+  sig_deps_list$PBS_vs_A5B5 %>%
+    dplyr::filter(Regulation == "Down") %>%
+    dplyr::pull("Gene Name")
+)
+
+genes_down_both <- sort(unique(genes_down_both))
+
+fxx.create_and_setwd(file.path(root_path, res_folder, "Protein.02.degs"))
+saveRDS(deps_list_origin, "PBS_CHX_AB5.deps_list_origin.rds")
+saveRDS(deps_list, "PBS_CHX_AB5.deps_list.rds")
+saveRDS(genes_down_both, "shared_downregulated_genes_AB5_vs_PBS_CHX.rds")
+
+```
+```{r Enrichment analysis of differentially expressed E.coli proteins}
+setwd(file.path(root_path, res_folder, "Protein.02.degs"))
+genes_down_both <- readRDS("2Down_deps(AB5-Vs-PBS,CHX).Rds")
+
+target_genes <- genes_down_both
+#---- KEGG enrichment analysis
+# ID tranformation
+gene_entrez <- bitr(
+  target_genes,
+  fromType = "SYMBOL",
+  toType = "ENTREZID",
+  OrgDb = org.EcK12.eg.db
+) %>%
+  dplyr::distinct(ENTREZID, .keep_all = TRUE)
+
+
+gene_entrez_background <- bitr(
+  degs_list$CHX_vs_A5B5$gene_symbol,
+  fromType = "SYMBOL",
+  toType = "ENTREZID",
+  OrgDb = org.EcK12.eg.db
+) %>%
+  dplyr::distinct(ENTREZID, .keep_all = TRUE)
+
+
+kegg_enrich <- enrichKEGG(
+  gene = gene_entrez$ENTREZID,
+  organism = "eco",
+  keyType = "ncbi-geneid",
+  pvalueCutoff = 1,
+  qvalueCutoff = 1
+)
+
+# set storage obj
+library(dplyr)
+library(stringr)
+library(purrr)
+
+kegg_enrich_df <- data.frame(kegg_enrich)
+id2symbol <- setNames(gene_entrez$SYMBOL, gene_entrez$ENTREZID)
+
+kegg_enrich_df <- kegg_enrich_df %>%
+  mutate(
+    geneID = as.character(geneID),
+    GeneSymbol = map_chr(
+      str_split(geneID, "/"),
+      ~ {
+        ids <- str_trim(.x)
+        syms <- id2symbol[ids]
+        
+        paste(ifelse(is.na(syms), ids, syms), collapse = "/")
+      }
+    )
+  )
+
+out_dir <- "Protein.03.Enrich"
+setwd(file.path(root_path, res_folder, out_dir))
+writexl::write_xlsx(kegg_enrich_df, path = "Unique_down_in_A5B5.xlsx")
+
+
+##======================##
+#program: use Gene SYMBOL -> GO enrichment（MF/BP/CC）
+##======================##
+
+library(tidyverse)
+library(AnnotationDbi)
+library(org.EcK12.eg.db)
+library(GO.db)
+library(clusterProfiler)
+
+#===== Part 1. SYMBOL
+gene_symbol <- target_genes %>% as.character() %>% unique()
+universe_symbol <- deps_list$CHX_vs_A5B5$`Gene Name` %>% as.character() %>% unique() 
+
+#===== Part 2. SYMBOL -> GO 
+go_all_sym <- AnnotationDbi::select(
+  org.EcK12.eg.db,
+  keys = universe_symbol,
+  keytype = "SYMBOL",
+  columns = c("SYMBOL","GO","ONTOLOGY")
+) %>%
+  as_tibble() %>%
+  filter(!is.na(GO), !is.na(ONTOLOGY)) %>%
+  distinct()
+
+TERM2NAME <- AnnotationDbi::select(
+  GO.db,
+  keys = unique(go_all_sym$GO),
+  keytype = "GOID",
+  columns = c("GOID","TERM")
+) %>%
+  as_tibble() %>%
+  transmute(term = GOID, name = TERM) %>%
+  distinct()
+
+TERM2GENE_MF <- go_all_sym %>% filter(ONTOLOGY == "MF") %>% transmute(term = GO, gene = SYMBOL) %>% distinct()
+TERM2GENE_BP <- go_all_sym %>% filter(ONTOLOGY == "BP") %>% transmute(term = GO, gene = SYMBOL) %>% distinct()
+TERM2GENE_CC <- go_all_sym %>% filter(ONTOLOGY == "CC") %>% transmute(term = GO, gene = SYMBOL) %>% distinct()
+
+TERM2NAME_MF <- TERM2NAME %>% semi_join(TERM2GENE_MF %>% distinct(term), by = "term")
+TERM2NAME_BP <- TERM2NAME %>% semi_join(TERM2GENE_BP %>% distinct(term), by = "term")
+TERM2NAME_CC <- TERM2NAME %>% semi_join(TERM2GENE_CC %>% distinct(term), by = "term")
+
+#===== Part 3. enrichment
+ego_mf <- enricher(
+  gene = gene_symbol,
+  universe = universe_symbol,
+  TERM2GENE = TERM2GENE_MF,
+  TERM2NAME = TERM2NAME_MF,
+  pAdjustMethod = "BH",
+  pvalueCutoff = 1,
+  qvalueCutoff = 1,
+  minGSSize = 5,
+  maxGSSize = 500
+)
+
+ego_bp <- enricher(
+  gene = gene_symbol, 
+  universe = universe_symbol,
+  TERM2GENE = TERM2GENE_BP,
+  TERM2NAME = TERM2NAME_BP,
+  pAdjustMethod = "BH",
+  pvalueCutoff = 1,
+  qvalueCutoff = 1,
+  minGSSize = 5,
+  maxGSSize = 500
+)
+
+ego_cc <- enricher(
+  gene = gene_symbol,
+  universe = universe_symbol,
+  TERM2GENE = TERM2GENE_CC,
+  TERM2NAME = TERM2NAME_CC,
+  pAdjustMethod = "BH",
+  pvalueCutoff = 1,
+  qvalueCutoff = 1,
+  minGSSize = 5,
+  maxGSSize = 500
+)
+
+mf_res <- if (is.null(ego_mf)) tibble() else as_tibble(ego_mf@result)
+bp_res <- if (is.null(ego_bp)) tibble() else as_tibble(ego_bp@result)
+cc_res <- if (is.null(ego_cc)) tibble() else as_tibble(ego_cc@result)
+
+mf_res
+bp_res
+cc_res
+
+go_res <- bind_rows(
+  mf_res %>% mutate(Cluster = "MF"),
+  bp_res %>% mutate(Cluster = "BP"),
+  cc_res %>% mutate(Cluster = "CC")
+) %>%
+  relocate(Cluster, .before = 1)
+go_res
+
+
+library(tidyverse)
+library(writexl)
+
+xlsx_out <- "GO_enrichment_results.xlsx"
+
+writexl::write_xlsx(
+  list(
+    MF = mf_res,
+    BP = bp_res,
+    CC = cc_res,
+    GO_all = go_res
+  ),
+  path = xlsx_out
+)
+
+```
+
+```{r group color}
+# set color
+my_colors <- c(
+  "PBS" =  "#8F5F9F", # Pg: Disease
+  "CHX" =  "#E7B30B", # Positive treatment
+  "A5B5" = "#315E85"  # AE treatment
+)
+```
+```{r Protein PCA Visualization}
+# Import TMT proteomics abundance data
+setwd(file.path(root_path, data_folder, "DZLM2023051322-b1/result/3.Reliable_results"))
+
+# Import expression matrix (Accession: UniProt ID)
+expression_data <- readxl::read_xlsx("plot_data.xlsx")
+
+# Construct clinical metadata
+cli <- data.frame(
+  samples = c("PBS-1", "PBS-2", "PBS-3",
+              "CHX1-1", "CHX1-2", "CHX1-3",
+              "AB5-1", "AB5-2", "AB5-3"),
+  group = c(rep("PBS", 3), rep("CHX", 3), rep("A5B5", 3))
+)
+
+cli$group <- factor(cli$group, levels = c("PBS", "CHX", "A5B5"))
+
+# Build matrix object
+matrix <- expression_data %>%
+  tibble::column_to_rownames("Accession")
+
+clinical <- cli %>%
+  mutate(Group = group)
+
+out_dir <- "Pro-01.pca"
+fxx.create_and_setwd(file.path(root_path, res_folder, out_dir))
+
+setwd(file.path(root_path, code_folder, "lib"))
+source("fxx.plot_tsne.R")
+source("fxx.plot_pca.R")
+source("fxx.plot_umap.R")
+
+# Color palette
+my_colors <- c(
+  "PBS" = "#8F5F9F",
+  "CHX" = "#E7B30B",
+  "A5B5" = "#315E85"
+)
+
+# PCA analysis
+set.seed(11)
+library(Rtsne)
+
+matrix_t <- t(matrix)
+pca_out <- prcomp(matrix_t, scale = TRUE)
+
+pca_data <- data.frame(
+  PC1 = pca_out$x[, 1],
+  PC2 = pca_out$x[, 2],
+  Group = clinical$Group
+)
+
+# PCA visualization
+pca_plots <- fxx.plot_pca(pca_data, group = "Group", mycol = my_colors)
+
+# Save all plots
+plot_names <- c(
+  "base", "colored", "shaped", "ellipse",
+  "filled_ellipse", "filled_bordered_ellipse",
+  "firework_base", "firework_centroid", "firework_ellipse"
+)
+
+for (plot_name in plot_names) {
+  plot_obj <- pca_plots[[plot_name]]
+  fxx.save_ggplot2_obj2res(
+    final_folder = out_dir,
+    p = plot_obj,
+    p_filename = paste0("PCA_All_samples_", plot_name),
+    width = 3.4,
+    height = 2.7
+  )
+}
+
+
+# PCA variance explained
+pca_var_df <- tibble::tibble(
+  PC = paste0("PC", seq_along(pca_out$sdev)),
+  var = pca_out$sdev^2
+) %>%
+  dplyr::mutate(
+    var_ratio = var / sum(var),
+    var_pct = var_ratio * 100,
+    cum_pct = cumsum(var_pct)
+  ) %>%
+  dplyr::arrange(dplyr::desc(var_pct))
+
+pca_var_df
+
+# Variable contribution to a selected principal component
+pc <- 1L
+pc_name <- paste0("PC", pc)
+
+pc1_contrib <- tibble::tibble(
+  Accession = rownames(pca_out$rotation),
+  loading = pca_out$rotation[, pc_name],
+  contrib = loading^2
+) %>%
+  dplyr::arrange(dplyr::desc(contrib))
+
+pc1_contrib
+
+# Map accession to gene name
+accession_df <- mat %>%
+  dplyr::select(Accession, `Gene Name`)
+accession_df <- accession_df[!duplicated(accession_df$Accession), ]
+
+accession_df.gene_name.column <- accession_df %>%
+  dplyr::filter(Accession %in% pc1_contrib$Accession) %>%
+  dplyr::pull(`Gene Name`)
+
+pc1_contrib <- pc1_contrib %>%
+  dplyr::mutate(genes = accession_df.gene_name.column)
+
+setwd(file.path(root_path, res_folder, out_dir))
+writexl::write_xlsx(pc1_contrib, path = "pc1_contrib.xlsx")
+
+# Top variable contributions for multiple principal components
+pcs <- paste0("PC", 1:2)
+top_n <- 50
+
+pc_contrib_multi <- purrr::map_dfr(pcs, function(pc_name) {
+  tibble::tibble(
+    Accession = rownames(pca_out$rotation),
+    PC = pc_name,
+    loading = pca_out$rotation[, pc_name],
+    contrib = loading^2
+  )
+}) %>%
+  dplyr::group_by(PC) %>%
+  dplyr::arrange(dplyr::desc(contrib), .by_group = TRUE) %>%
+  dplyr::slice_head(n = top_n) %>%
+  dplyr::ungroup()
+
+pc_contrib_multi
+```
+```{r Volcano plot of comparision groups}
+##============================================================================##
+# Program: Volcano plot of differential expression analysis
+##============================================================================##
+library(dplyr)
+library(ggplot2)
+library(ggrepel)
+
+setwd(file.path(root_path, res_folder, "Protein.02.degs"))
+deps_list <- readRDS(file = "PBS,CHX,AB5.deps_list(q_sig).Rds")
+
+# set color
+my_colors <- c(
+  "PBS" =  "#8F5F9F",
+  "CHX" =  "#E7B30B",
+  "A5B5" = "#315E85"
+)
+
+
+# 准备用函数画图的代码块
+fxx.plot_volcano_for_contrast <- function(list_obj = degs_list, contrast_name = "Healthy_Vs_Disease", 
+                                          gene_symbol = "gene_symbol", log2FoldChange = "log2FoldChange"){
+  df <- list_obj[[contrast_name]] %>%
+    rename(
+      gene = gene_symbol,
+      log2FC = log2FoldChange,
+      qvalue = `q-value`
+    ) %>%
+    filter(!is.na(log2FC), !is.na(qvalue))
+  
+  q_thresh <- 0.05
+  df <- df %>%
+    mutate(
+      significant = qvalue < q_thresh,
+      regulation = case_when(
+        significant & log2FC > 0 ~ "Up",
+        significant & log2FC < 0 ~ "Down",
+        TRUE ~ "NotSig"
+      ),
+      color = case_when(
+        regulation == "Up" ~ my_colors[sapply(strsplit(contrast_name, "_vs_"), `[`, 2)],   
+        regulation == "Down" ~ my_colors[sapply(strsplit(contrast_name, "_vs_"), `[`, 1)], 
+        regulation == "NotSig" ~ "grey80"
+      )
+    )
+  
+  
+  n_up <- df %>% filter(regulation == "Up") %>% nrow()
+  n_down <- df %>% filter(regulation == "Down") %>% nrow()
+  n_total_sig <- df %>% filter(significant) %>% nrow()
+  
+  x_min <- min(df$log2FC, na.rm = TRUE)
+  x_max <- max(df$log2FC, na.rm = TRUE)
+  y_vals <- -log10(df$qvalue)
+  y_min <- min(y_vals, na.rm = TRUE)
+  y_max <- max(y_vals, na.rm = TRUE)
+  
+  round_down_05 <- function(x) floor(x * 2) / 2
+  round_up_05 <- function(x) ceiling(x * 2) / 2
+  
+  x_lim <- c(round_down_05(x_min), round_up_05(x_max))
+  y_lim <- c(round_down_05(y_min), round_up_05(y_max))
+  
+  main_title <- paste0("Experiment ", strsplit(contrast_name, "_vs_")[[1]][2],
+                       ", Control ", strsplit(contrast_name, "_vs_")[[1]][1])
+  
+  p <- ggplot(df, aes(x = log2FC, y = y_vals)) +
+    geom_point(aes(color = color), size = 1.5, alpha = 0.8) +
+    scale_color_identity() +
+    geom_vline(xintercept = 0, linetype = "dashed", color = "black", linewidth = 0.75) +
+    geom_hline(yintercept = -log10(q_thresh), linetype = "dashed", color = "black", linewidth = 0.75) +
+    labs(
+      x = "Log2 Fold Change",
+      y = "-Log10(p.adj)",
+      title = main_title
+    ) +
+    coord_cartesian(xlim = x_lim, ylim = y_lim) +
+    theme_minimal() +
+    theme(
+      legend.position = "none",
+      axis.text = element_text(color = "#000000", size = 6),
+      axis.title = element_text(color = "#000000", size = 6),
+      plot.title = element_text(size = 6, face = "bold"),
+      plot.subtitle = element_text(size = 6),
+      panel.grid = element_blank(),
+      panel.border = element_rect(color = "black", fill = NA, linewidth = 0.75),
+      panel.background = element_rect(fill = "white", colour = NA)
+    )
+  
+  return(p)
+}
+fxx.plot_volcano_for_contrast.NoVline <- function(list_obj = degs_list, contrast_name = "Healthy_Vs_Disease", 
+                                                  gene_symbol = "gene_symbol", log2FoldChange = "log2FoldChange") {
+  df <- list_obj[[contrast_name]] %>%
+    rename(
+      gene = gene_symbol,
+      log2FC = log2FoldChange,
+      qvalue = `q-value`
+    ) %>%
+    filter(!is.na(log2FC), !is.na(qvalue))
+  
+  q_thresh <- 0.05
+  df <- df %>%
+    mutate(
+      significant = qvalue < q_thresh,
+      regulation = case_when(
+        significant & log2FC > 0 ~ "Up",
+        significant & log2FC < 0 ~ "Down",
+        TRUE ~ "NotSig"
+      ),
+      color = case_when(
+        regulation == "Up" ~ my_colors[sapply(strsplit(contrast_name, "_vs_"), `[`, 2)],   
+        regulation == "Down" ~ my_colors[sapply(strsplit(contrast_name, "_vs_"), `[`, 1)], 
+        regulation == "NotSig" ~ "grey80"
+      )
+    )
+  
+  n_up <- df %>% filter(regulation == "Up") %>% nrow()
+  n_down <- df %>% filter(regulation == "Down") %>% nrow()
+  n_total_sig <- df %>% filter(significant) %>% nrow()
+
+  x_min <- min(df$log2FC, na.rm = TRUE)
+  x_max <- max(df$log2FC, na.rm = TRUE)
+  y_vals <- -log10(df$qvalue)
+  y_min <- min(y_vals, na.rm = TRUE)
+  y_max <- max(y_vals, na.rm = TRUE)
+  
+  round_down_05 <- function(x) floor(x * 2) / 2
+  round_up_05 <- function(x) ceiling(x * 2) / 2
+  
+  x_lim <- c(round_down_05(x_min), round_up_05(x_max))
+  y_lim <- c(round_down_05(y_min), round_up_05(y_max))
+  
+  main_title <- paste0("Experiment ", strsplit(contrast_name, "_vs_")[[1]][2],
+                       ", Control ", strsplit(contrast_name, "_vs_")[[1]][1])
+  
+  p <- ggplot(df, aes(x = log2FC, y = y_vals)) +
+    geom_point(aes(color = color), size = 1.5, alpha = 0.8) +
+    scale_color_identity() +
+    labs(
+      x = "Log2 Fold Change",
+      y = "-Log10(p.adj)",
+      title = main_title
+    ) +
+    coord_cartesian(xlim = x_lim, ylim = y_lim) +
+    theme_minimal() +
+    theme(
+      legend.position = "none",
+      axis.text = element_text(color = "#000000", size = 6),
+      axis.title = element_text(color = "#000000", size = 6),
+      plot.title = element_text(size = 6, face = "bold"),
+      plot.subtitle = element_text(size = 6),
+      panel.grid = element_blank(),
+      panel.border = element_rect(color = "black", fill = NA, linewidth = 0.75),
+      panel.background = element_rect(fill = "white", colour = NA)
+    )
+  
+  return(p)
+}
+
+
+p_CHX_vs_A5B5 <- fxx.plot_volcano_for_contrast(contrast_name = "CHX_vs_A5B5", list_obj = deps_list, gene_symbol = "Gene Name", log2FoldChange = "log2FoldChange")
+p_PBS_vs_CHX  <- fxx.plot_volcano_for_contrast(contrast_name = "PBS_vs_CHX" , list_obj = deps_list, gene_symbol = "Gene Name", log2FoldChange = "log2FoldChange")
+p_PBS_vs_A5B5 <- fxx.plot_volcano_for_contrast(contrast_name = "PBS_vs_A5B5", list_obj = deps_list, gene_symbol = "Gene Name", log2FoldChange = "log2FoldChange")
+
+p_CHX_vs_A5B5.NoVline  <- fxx.plot_volcano_for_contrast.NoVline(contrast_name = "CHX_vs_A5B5", list_obj = deps_list, 
+                                                                gene_symbol = "Gene Name", log2FoldChange = "log2FoldChange")
+p_PBS_vs_CHX.NoVline   <- fxx.plot_volcano_for_contrast.NoVline(contrast_name = "PBS_vs_CHX" , list_obj = deps_list, 
+                                                                gene_symbol = "Gene Name", log2FoldChange = "log2FoldChange")
+p_PBS_vs_A5B5.NoVline  <- fxx.plot_volcano_for_contrast.NoVline(contrast_name = "PBS_vs_A5B5", list_obj = deps_list, 
+                                                                gene_symbol = "Gene Name", log2FoldChange = "log2FoldChange")
+
+out_dir <- "Protein.02.degs-02.VolPlot"
+setwd(file.path(root_path, res_folder, out_dir))
+
+# > p_CHX_vs_A5B5 <- fxx.plot_volcano_for_contrast(contrast_name = "CHX_vs_A5B5", list_obj = deps_list, gene_symbol = "Gene Name", log2FoldChange = "log2FoldChange")
+# [1] "CHX_vs_A5B5 — UP: 199; Down: 205; ALL-Sig: 404"
+# > p_PBS_vs_CHX  <- fxx.plot_volcano_for_contrast(contrast_name = "PBS_vs_CHX" , list_obj = deps_list, gene_symbol = "Gene Name", log2FoldChange = "log2FoldChange")
+# [1] "PBS_vs_CHX — UP: 410 ; Down: 486 ; ALL-Sig: 896"
+# > p_PBS_vs_A5B5 <- fxx.plot_volcano_for_contrast(contrast_name = "PBS_vs_A5B5", list_obj = deps_list, gene_symbol = "Gene Name", log2FoldChange = "log2FoldChange")
+# [1] "PBS_vs_A5B5 — UP: 154 ; Down: 201 ; ALL-Sig: 355"
+```
+```{r Venn plot of common down-regulated proteins of comparision groups}
+##============================================================================##
+# Program: Statistical analysis and Visual by Venn plot
+##============================================================================##
+setwd(file.path(root_path, res_folder, "Protein.02.degs"))
+deps_list <- readRDS("PBS,CHX,AB5.deps_list(q_sig).Rds")
+
+# 筛选
+sig_deps_list <- imap(deps_list, ~{
+  x <- .x
+  if (is.null(x) || nrow(x) == 0) return(tibble())
+  x %>% dplyr::filter(`q-value` < 0.05)
+})
+
+
+library(tidyverse)
+
+genes_down_both <- intersect(
+  sig_deps_list$CHX_vs_A5B5 %>% dplyr::filter(Regulation == "Down") %>% dplyr::pull("Gene Name"),
+  sig_deps_list$PBS_vs_A5B5 %>% dplyr::filter(Regulation == "Down") %>% dplyr::pull("Gene Name")
+)
+
+genes_down_both <- sort(unique(genes_down_both))
+genes_down_both %>% length() # 51
+nrow(sig_deps_list$CHX_vs_A5B5 %>% dplyr::filter(Regulation == "Down")) # 205
+nrow(sig_deps_list$PBS_vs_A5B5 %>% dplyr::filter(Regulation == "Down")) # 201
+
+205 - 51 = 154
+201 - 51 = 150
+
+##----------------------------------------------------------------------------##
+## Program: Venn (proteins, 3 Interact)
+##----------------------------------------------------------------------------##
+setwd(file.path(root_path, res_folder, ""))
+deps_list <- readRDS("PBS,CHX,AB5.deps_list(q_sig).Rds")
+
+# 筛选
+sig_deps_list <- imap(deps_list, ~{
+  x <- .x
+  if (is.null(x) || nrow(x) == 0) return(tibble())
+  x %>% dplyr::filter(`q-value` < 0.05)
+})
+
+library(VennDiagram)
+venn.plot <- venn.diagram(
+  x = list(
+    sig_deps_list$CHX_vs_A5B5 %>% dplyr::filter(Regulation == "Down") %>% dplyr::pull(`Gene Name`),
+    sig_deps_list$PBS_vs_A5B5 %>% dplyr::filter(Regulation == "Down") %>% dplyr::pull(`Gene Name`),
+    sig_deps_list$PBS_vs_CHX  %>% dplyr::filter(Regulation == "Down") %>% dplyr::pull(`Gene Name`)
+  ),
+  category.names = c("CHX_vs_A5B5", "PBS_vs_A5B5", "PBS_vs_CHX"),  
+  filename = NULL, 
+  fill = c("#3C7584", "#949598", "#BE7A9A"),   
+  cex = 0.6,           
+  cat.cex = 0.6,       
+  fontsize = 6,        
+  cat.fontsize = 6,     
+  lwd = 0.75,         
+  lty = 1           
+)
+
+grid.draw(venn.plot)
+
+out_dir = "Protein.02.degs-03.VennPlot"  
+fxx.create_and_setwd(file.path(root_path, res_folder, out_dir))
+fxx.save_baseplot_obj2res(
+  out_dir, 
+  p_filename = "02.Venn(3_down_intersect)",  
+  p = venn.plot, 
+  height = 4.8,   
+  width = 5, 
+  dpi = 600
+)
+
+#================================#
+# Program: intersect
+#================================#
+venn.plot <- venn.diagram(
+  x = list(
+    sig_deps_list$CHX_vs_A5B5 %>%
+      dplyr::filter(Regulation == "Down") %>%
+      dplyr::pull(`Gene Name`),
+    sig_deps_list$PBS_vs_A5B5 %>%
+      dplyr::filter(Regulation == "Down") %>%
+      dplyr::pull(`Gene Name`)
+  ),
+  category.names = c("CHX_vs_A5B5", "PBS_vs_A5B5"),
+  filename = NULL,
+  fill = c("#3C7584", "#949598"),
+  cex = 0.6,
+  cat.cex = 0.6,
+  fontsize = 6,
+  cat.fontsize = 6,
+  lwd = 0.75,
+  lty = 1
+)
+
+grid.draw(venn.plot)
+
+out_dir <- "Protein.02.degs-03.VennPlot"
+fxx.create_and_setwd(file.path(root_path, res_folder, out_dir))
+fxx.save_baseplot_obj2res(
+  out_dir,
+  p_filename = "01.Venn_2_down_intersect",
+  p = venn.plot,
+  height = 4.8,
+  width = 5,
+  dpi = 600
+)
+
+```
+```{r the pathway enrichment analysis and visualization of  Down-regulated proteins}
+##============================================================================##
+# Program: Pathway enrichment analysis, Visualization
+##============================================================================##
+setwd(file.path(root_path, res_folder, "Protein.03.Enrich"))
+kegg_enrich_df <- readxl::read_xlsx("Unique_down_in_A5B5.xlsx")
+
+setwd(file.path(root_path, res_folder, "Protein.03.Enrich"))
+go_kegg_df <- readxl::read_xlsx("GO_enrichment_results.xlsx", sheet = "GO_all")
+
+sig_enrich_diff <- list(
+  "kegg"  = kegg_enrich_df %>% dplyr::filter(pvalue < 0.05),
+  "go"    = go_kegg_df %>% dplyr::filter(pvalue < 0.05)
+)
+
+dt <- sig_enrich_diff$kegg %>%
+  dplyr::mutate(
+    Pvalue = pvalue,
+    Description = Description,
+    geneID = GeneSymbol,
+    Cluster = subcategory) %>%
+  dplyr::select(Pvalue, Description, geneID, Cluster) %>%
+  dplyr::arrange(Pvalue) %>%
+  dplyr::mutate(Description = factor(Description, levels = rev(Description)))  
+
+# dt: Pvalue, Description, Cluster
+title <- "KEGG enrichment of Down-regualted Protein"
+x_axis_title <- "-Log10Pvalue"
+y_axis_title <- "Pathways"
+color_palette <- c('#3C5488', '#8491B4')
+
+p <- ggplot(dt) +
+  geom_bar(aes(x = -log10(Pvalue), y = Description, fill = Cluster),
+           width = 0.5, stat = 'identity', size = 0.2625) +  # 0.75pt = 0.2625mm
+  geom_text(aes(x = 0.1, y = Description, label = Description),
+            size = 2.1, hjust = 0) +                        # 6pt = 2.1mm
+  geom_text(aes(x = 0.1, y = Description, label = geneID, color = Cluster),
+            size = 2.1, fontface = 'italic', hjust = 0, vjust = 2.3) + # 6pt = 2.1mm
+  scale_x_continuous(expand = c(0, 0)) +
+  scale_fill_manual(values = color_palette) +
+  scale_color_manual(values = color_palette) +
+  labs(x = x_axis_title,
+       y = y_axis_title,
+       title = title) +
+  theme_classic() +
+  theme(
+    legend.position = 'none',
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank(),
+    plot.title = element_text(size = 6, face = 'bold', lineheight = 0.75), # 6pt
+    axis.title = element_text(size = 6),   # 6pt
+    axis.text = element_text(size = 6),    # 6pt
+    axis.line = element_line(size = 0.2625),  # 0.75pt = 0.2625mm
+    panel.border = element_blank()
+  )
+
+p
+
+out_dir <- "Protein.03.Enrich-02.Enrich Barplot"
+fxx.create_and_setwd(file.path(root_path, res_folder, out_dir))
+
+# > unique(sig_enrich_diff$kegg$subcategory)
+# [1] "Cellular community - prokaryotes" "Translation"                     
+# [3] "Folding, sorting and degradation" "Membrane transport"   
+
+# color_palette <- c('#4E86AB', '#B79090', "#3C7584", "#D7C6CA")
+
+
+
+dt <- sig_enrich_diff$go %>%
+  dplyr::mutate(
+    Pvalue = pvalue,
+    Description = Description,
+    geneID = geneID,
+    Cluster = Cluster) %>%
+  dplyr::select(Pvalue, Description, geneID, Cluster) %>%
+  dplyr::arrange(Pvalue) %>%
+  dplyr::mutate(Description = factor(Description, levels = rev(Description)))  
+
+
+# dt: Pvalue, Description, Cluster
+title <- "GO enrichment of Down-regualted Protein"
+x_axis_title <- "-Log10Pvalue"
+y_axis_title <- "Pathways"
+color_palette <- c('#6E9090', '#9FA1A2', "#CC9C77") # BP CC MF
+
+p <- ggplot(dt) +
+  geom_bar(aes(x = -log10(Pvalue), y = Description, fill = Cluster),
+           width = 0.5, stat = 'identity', size = 0.2625) +  # 0.75pt = 0.2625mm
+  geom_text(aes(x = 0.1, y = Description, label = Description),
+            size = 2.1, hjust = 0) +                        # 6pt = 2.1mm
+  geom_text(aes(x = 0.1, y = Description, label = geneID, color = Cluster),
+            size = 2.1, fontface = 'italic', hjust = 0, vjust = 2.3) + # 6pt = 2.1mm
+  scale_x_continuous(expand = c(0, 0)) +
+  scale_fill_manual(values = color_palette) +
+  scale_color_manual(values = color_palette) +
+  labs(x = x_axis_title,
+       y = y_axis_title,
+       title = title) +
+  theme_classic() +
+  theme(
+    legend.position = 'none',
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank(),
+    plot.title = element_text(size = 6, face = 'bold', lineheight = 0.75), # 6pt
+    axis.title = element_text(size = 6),   # 6pt
+    axis.text = element_text(size = 6),    # 6pt
+    axis.line = element_line(size = 0.2625),  # 0.75pt = 0.2625mm
+    panel.border = element_blank()
+  )
+
+p
+
+out_dir <- "Protein.03.Enrich-02.Enrich Barplot"
+setwd(file.path(root_path, res_folder, out_dir))
+```
+```{r GSVA  scoring of pathways}
+##======================##
+# Program: GSVA scoring with gmt_go (SYMBOL) and differential analysis between two groups
+##======================##
+library(tidyverse)
+library(data.table)
+library(readxl)
+library(writexl)
+library(org.EcK12.eg.db)
+library(AnnotationDbi)
+library(GSEABase)
+library(fgsea)
+library(GSVA)
+library(limma)
+
+# Generate GO term to gene set mapping
+selected_pathes <- list(
+  "kegg" = read_xlsx("selected_pathway.xlsx", sheet = "Protein_kegg_path"),
+  "go" = read_xlsx("selected_pathway.xlsx", sheet = "Protein_go_path")
+)
+
+out_dir <- "Protein.05.EnrichPath-03.GSVA"
+fxx.create_and_setwd(file.path(root_path, res_folder, out_dir))
+
+go_df <- selected_pathes$go %>%
+  dplyr::select(ID, Description) %>%
+  distinct() %>%
+  drop_na(ID)
+
+go2sym <- AnnotationDbi::select(
+  org.EcK12.eg.db,
+  keys = go_df$ID,
+  keytype = "GO",
+  columns = c("SYMBOL")
+) %>%
+  as_tibble() %>%
+  filter(!is.na(SYMBOL)) %>%
+  distinct(GO, SYMBOL) %>%
+  inner_join(go_df, by = c("GO" = "ID")) %>%
+  transmute(term_id = GO, term_name = Description, gene = as.character(SYMBOL))
+
+gmt_go_list <- go2sym %>%
+  group_by(term_name, term_id) %>%
+  summarise(genes = list(sort(unique(gene))), .groups = "drop") %>%
+  mutate(size = lengths(genes)) %>%
+  filter(size >= 1) %>%
+  transmute(pathway = term_name, genes)
+
+gmt_go <- setNames(gmt_go_list$genes, gmt_go_list$pathway)
+saveRDS(gmt_go, "selected_GO.gmt_list.symbol.Rds")
+
+# GSVA: PBS vs A5B5
+setwd(file.path(root_path, res_folder, "Protein.01.matirx+cli.format"))
+
+expr_mat <- readRDS("matrix.Rds") %>%
+  as.data.frame() %>%
+  dplyr::select(
+    "PBS-1", "PBS-2", "PBS-3",
+    "AB5-1", "AB5-2", "AB5-3"
+  ) %>%
+  as.matrix()
+
+clinical <- readRDS("clinical.Rds") %>%
+  dplyr::filter(group %in% c("PBS", "A5B5"))
+
+clinical_sub <- clinical %>%
+  dplyr::filter(samples %in% colnames(expr_mat)) %>%
+  dplyr::select(samples, group) %>%
+  distinct() %>%
+  arrange(match(samples, colnames(expr_mat)))
+
+expr_mat <- expr_mat[, clinical_sub$samples, drop = FALSE]
+
+out_dir <- "Protein.05.EnrichPath-03.GSVA"
+fxx.create_and_setwd(file.path(root_path, res_folder, out_dir))
+
+gsva_score <- GSVA::gsva(
+  expr = expr_mat,
+  gset.idx.list = gmt_go,
+  method = "gsva",
+  kcdf = "Gaussian",
+  min.sz = 1,
+  max.sz = 5000,
+  verbose = FALSE
+)
+
+design <- model.matrix(~0 + group, data = clinical_sub)
+colnames(design) <- gsub("^group", "", colnames(design))
+
+fit <- lmFit(gsva_score, design) %>%
+  contrasts.fit(makeContrasts(A5B5 - PBS, levels = design)) %>%
+  eBayes()
+
+gsva_diff_tbl <- topTable(fit, number = Inf, sort.by = "P") %>%
+  as_tibble(rownames = "pathway") %>%
+  arrange(adj.P.Val, desc(logFC))
+
+saveRDS(gsva_score, "gsva_selected_GO_scores(PBS-vs-A5B5).Rds")
+write_xlsx(gsva_score %>% as.data.frame(), "gsva_selected_GO(PBS-vs-A5B5).xlsx")
+saveRDS(gsva_diff_tbl, "gsva_selected_GO_diff(PBS-vs-A5B5).Rds")
+write_xlsx(gsva_diff_tbl, "gsva_selected_GO_diff(PBS-vs-A5B5).xlsx")
+
+# GSVA: CHX vs A5B5
+setwd(file.path(root_path, res_folder, "Protein.01.matirx+cli.format"))
+
+expr_mat <- readRDS("matrix.Rds") %>%
+  as.data.frame() %>%
+  dplyr::select(
+    "CHX1-1", "CHX1-2", "CHX1-3",
+    "AB5-1", "AB5-2", "AB5-3"
+  ) %>%
+  as.matrix()
+
+clinical <- readRDS("clinical.Rds") %>%
+  dplyr::filter(group %in% c("CHX", "A5B5"))
+
+clinical_sub <- clinical %>%
+  dplyr::filter(samples %in% colnames(expr_mat)) %>%
+  dplyr::select(samples, group) %>%
+  distinct() %>%
+  arrange(match(samples, colnames(expr_mat)))
+
+expr_mat <- expr_mat[, clinical_sub$samples, drop = FALSE]
+
+out_dir <- "Protein.05.EnrichPath-03.GSVA"
+fxx.create_and_setwd(file.path(root_path, res_folder, out_dir))
+
+gsva_score2 <- GSVA::gsva(
+  expr = expr_mat,
+  gset.idx.list = gmt_go,
+  method = "gsva",
+  kcdf = "Gaussian",
+  min.sz = 1,
+  max.sz = 5000,
+  verbose = FALSE
+)
+
+design2 <- model.matrix(~0 + group, data = clinical_sub)
+colnames(design2) <- gsub("^group", "", colnames(design2))
+
+fit2 <- lmFit(gsva_score2, design2) %>%
+  contrasts.fit(makeContrasts(A5B5 - CHX, levels = design2)) %>%
+  eBayes()
+
+gsva_diff_tbl2 <- topTable(fit2, number = Inf, sort.by = "P") %>%
+  as_tibble(rownames = "pathway") %>%
+  arrange(adj.P.Val, desc(logFC))
+
+saveRDS(gsva_score2, "gsva_selected_GO_scores(CHX-vs-A5B5).Rds")
+write_xlsx(gsva_score2 %>% as.data.frame(), "gsva_selected_GO(CHX-vs-A5B5).xlsx")
+saveRDS(gsva_diff_tbl2, "gsva_selected_GO_diff(CHX-vs-A5B5).Rds")
+write_xlsx(gsva_diff_tbl2, "gsva_selected_GO_diff(CHX-vs-A5B5).xlsx")
+```
+```{r ssGSEA scoring of pathways}
+##======================##
+# Program: GSVA/ssGSEA scoring using GO-based gene sets (SYMBOL),
+# followed by two-group differential tests and result export
+##======================##
+
+library(tidyverse)
+library(data.table)
+library(readxl)
+library(writexl)
+library(org.EcK12.eg.db)
+library(AnnotationDbi)
+library(GSEABase)
+library(fgsea)
+library(GSVA)
+library(limma)
+
+#===== (1) Build GO gene sets: GO term -> SYMBOL =====#
+out_dir <- "Protein.05.EnrichPath-01.GSEA"
+fxx.create_and_setwd(file.path(root_path, res_folder, out_dir))
+
+selected_pathes <- list(
+  "kegg" = read_xlsx("selected_pathway.xlsx", sheet = "Protein_kegg_path"),
+  "go" = read_xlsx("selected_pathway.xlsx", sheet = "Protein_go_path")
+)
+
+out_dir <- "Protein.05.EnrichPath-03.GSVA(2test)"
+fxx.create_and_setwd(file.path(root_path, res_folder, out_dir))
+
+go_df <- selected_pathes$go %>%
+  dplyr::select(ID, Description) %>%
+  distinct() %>%
+  drop_na(ID)
+
+go2sym <- AnnotationDbi::select(
+  org.EcK12.eg.db,
+  keys = go_df$ID,
+  keytype = "GO",
+  columns = c("SYMBOL")
+) %>%
+  as_tibble() %>%
+  filter(!is.na(SYMBOL)) %>%
+  distinct(GO, SYMBOL) %>%
+  inner_join(go_df, by = c("GO" = "ID")) %>%
+  transmute(term_id = GO, term_name = Description, gene = as.character(SYMBOL))
+
+gmt_go_list <- go2sym %>%
+  group_by(term_name, term_id) %>%
+  summarise(genes = list(sort(unique(gene))), .groups = "drop") %>%
+  mutate(size = lengths(genes)) %>%
+  filter(size >= 1) %>%
+  transmute(pathway = term_name, genes)
+
+gmt_go <- setNames(gmt_go_list$genes, gmt_go_list$pathway)
+saveRDS(gmt_go, "selected_GO.gmt_list.symbol.Rds")
+
+#===== (2) Load expression matrix and clinical data =====#
+setwd(file.path(root_path, res_folder, "Protein.01.matirx+cli.format"))
+
+expr_mat <- readRDS("matrix.Rds") %>%
+  as.data.frame() %>%
+  dplyr::select(
+    "PBS-1", "PBS-2", "PBS-3",
+    "CHX1-1", "CHX1-2", "CHX1-3",
+    "AB5-1", "AB5-2", "AB5-3"
+  ) %>%
+  as.matrix()
+
+clinical <- readRDS("clinical.Rds")
+
+clinical_sub <- clinical %>%
+  dplyr::filter(samples %in% colnames(expr_mat)) %>%
+  dplyr::select(samples, group) %>%
+  distinct() %>%
+  arrange(match(samples, colnames(expr_mat)))
+
+expr_mat <- expr_mat[, clinical_sub$samples, drop = FALSE]
+
+#===== (3) GSVA scoring =====#
+out_dir <- "Protein.05.EnrichPath-03.GSVA(2test)"
+fxx.create_and_setwd(file.path(root_path, res_folder, out_dir))
+
+gsva_score <- GSVA::gsva(
+  expr = expr_mat,
+  gset.idx.list = gmt_go,
+  method = "gsva",
+  kcdf = "Gaussian",
+  min.sz = 1,
+  max.sz = 5000,
+  verbose = FALSE
+)
+
+df <- gsva_score %>%
+  as.data.frame() %>%
+  rownames_to_column("path")
+
+res <- df %>%
+  pivot_longer(-path, names_to = "sample", values_to = "value") %>%
+  mutate(group = case_when(
+    str_detect(sample, "^PBS") ~ "PBS",
+    str_detect(sample, "^CHX") ~ "CHX",
+    str_detect(sample, "^AB5") ~ "AB5",
+    TRUE ~ NA_character_
+  )) %>%
+  filter(!is.na(group)) %>%
+  group_by(path) %>%
+  summarise(
+    p_pbs_ab5 = t.test(value[group == "PBS"], value[group == "AB5"])$p.value,
+    p_chx_ab5 = t.test(value[group == "CHX"], value[group == "AB5"])$p.value,
+    .groups = "drop"
+  ) %>%
+  mutate(
+    padj_pbs_ab5 = p.adjust(p_pbs_ab5, method = "BH"),
+    padj_chx_ab5 = p.adjust(p_chx_ab5, method = "BH")
+  )
+
+sig_rows <- res %>%
+  filter(padj_pbs_ab5 < 0.05, padj_chx_ab5 < 0.05)
+
+saveRDS(gsva_score, "gsva_selected_GO_scores(3Group).Rds")
+write_xlsx(
+  gsva_score %>%
+    as.data.frame() %>%
+    tibble::rownames_to_column("path"),
+  "gsva_selected_GO(3Group).xlsx"
+)
+write_xlsx(res, "gsva_selected_GO_ttest_results.xlsx")
+write_xlsx(sig_rows, "gsva_selected_GO_ttest_significant.xlsx")
+
+#===== (4) ssGSEA scoring =====#
+out_dir <- "Protein.05.EnrichPath-02.ssGSEA2test)"
+fxx.create_and_setwd(file.path(root_path, res_folder, out_dir))
+
+ssgsea_score <- GSVA::gsva(
+  expr = expr_mat,
+  gset.idx.list = gmt_go,
+  method = "ssgsea",
+  kcdf = "Gaussian",
+  min.sz = 1,
+  max.sz = 5000,
+  verbose = FALSE
+)
+
+df <- ssgsea_score %>%
+  as.data.frame() %>%
+  rownames_to_column("path")
+
+res <- df %>%
+  pivot_longer(-path, names_to = "sample", values_to = "value") %>%
+  mutate(group = case_when(
+    str_detect(sample, "^PBS") ~ "PBS",
+    str_detect(sample, "^CHX") ~ "CHX",
+    str_detect(sample, "^AB5") ~ "AB5",
+    TRUE ~ NA_character_
+  )) %>%
+  filter(!is.na(group)) %>%
+  group_by(path) %>%
+  summarise(
+    p_pbs_ab5 = t.test(value[group == "PBS"], value[group == "AB5"])$p.value,
+    p_chx_ab5 = t.test(value[group == "CHX"], value[group == "AB5"])$p.value,
+    .groups = "drop"
+  ) %>%
+  mutate(
+    padj_pbs_ab5 = p.adjust(p_pbs_ab5, method = "BH"),
+    padj_chx_ab5 = p.adjust(p_chx_ab5, method = "BH")
+  )
+
+sig_rows <- res %>%
+  filter(padj_pbs_ab5 < 0.05, padj_chx_ab5 < 0.05)
+
+saveRDS(ssgsea_score, "ssgsea_selected_GO_scores(3Group).Rds")
+write_xlsx(
+  ssgsea_score %>%
+    as.data.frame() %>%
+    tibble::rownames_to_column("path"),
+  "ssgsea_selected_GO(3Group).xlsx"
+)
+write_xlsx(res, "ssgsea_selected_GO_ttest_results.xlsx")
+write_xlsx(sig_rows, "ssgsea_selected_GO_ttest_significant.xlsx")
+```
+
+

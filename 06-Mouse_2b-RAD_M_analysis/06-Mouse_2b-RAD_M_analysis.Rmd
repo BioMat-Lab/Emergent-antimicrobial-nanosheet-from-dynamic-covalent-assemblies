@@ -1,0 +1,634 @@
+```{r Count/abundance/clinical matrix}
+##============================================================================##
+# Program: ALDEx differential analysis for A5B5 and CHX
+##============================================================================##
+library(ALDEx2)
+library(tidyverse)
+library(readxl)
+
+data("selex")
+
+# Build count matrix
+setwd(file.path(root_path, data_folder, "./1.QC"))
+raw_count <- read_xlsx(
+  "Statistical_table_of_data_quantity_change.xlsx",
+  sheet = "Statistical_table_of_data_quant"
+)
+
+setwd(file.path(root_path, data_folder, "./2.Community_Structure"))
+abundance_mat <- read_xlsx(
+  "Abundance.filtered.anno.xlsx",
+  sheet = "Abundance.filtered.anno"
+)
+
+matrix <- abundance_mat %>%
+  dplyr::select(
+    "Species",
+    "CHX_1", "CHX_2", "CHX_3", "CHX_4", "CHX_5", "CHX_6",
+    "A5B5_1", "A5B5_2", "A5B5_3", "A5B5_4", "A5B5_5", "A5B5_6",
+    "Caries_1", "Caries_2", "Caries_3", "Caries_4", "Caries_5", "Caries_6"
+  )
+
+sum(duplicated(matrix$Species))
+
+matrix <- matrix %>%
+  as.data.frame() %>%
+  tibble::column_to_rownames("Species")
+
+# Build clinical metadata
+clinical <- data.frame(
+  samples = c(
+    "CHX_1", "CHX_2", "CHX_3", "CHX_4", "CHX_5", "CHX_6",
+    "A5B5_1", "A5B5_2", "A5B5_3", "A5B5_4", "A5B5_5", "A5B5_6",
+    "Caries_1", "Caries_2", "Caries_3", "Caries_4", "Caries_5", "Caries_6"
+  ),
+  group = c(rep("CHX", 6), rep("A5B5", 6), rep("PBS", 6))
+)
+
+fxx.create_and_setwd(file.path(root_path, res_folder, "01.count,matrix,clinical"))
+saveRDS(abundance_count_matrix, "abundance_count_matrix.Rds")
+saveRDS(matrix, "species_count_matrix.Rds")
+saveRDS(abundance_mat, "abundance_percent_matrix.Rds")
+saveRDS(clinical, "clinical.Rds")
+```
+```{r ALDEx differential analysis (CHX,A5B5)}
+##============================================================================##
+# Program: ALDEx differential analysis for A5B5 vs CHX
+##============================================================================##
+library(ALDEx2)
+library(tidyverse)
+library(readxl)
+
+data("selex")
+
+# Build count matrix
+setwd(file.path(root_path, data_folder, "./1.QC"))
+raw_count <- read_xlsx(
+  "Statistical_table_of_data_quantity_change.xlsx",
+  sheet = "Statistical_table_of_data_quant"
+)
+
+setwd(file.path(root_path, data_folder, "./2.Community_Structure"))
+abundance_mat <- read_xlsx(
+  "Abundance.filtered.anno.xlsx",
+  sheet = "Abundance.filtered.anno"
+)
+
+matrix <- abundance_mat %>%
+  dplyr::select(
+    "Species",
+    "CHX_1", "CHX_2", "CHX_3", "CHX_4", "CHX_5", "CHX_6",
+    "A5B5_1", "A5B5_2", "A5B5_3", "A5B5_4", "A5B5_5", "A5B5_6",
+    "Caries_1", "Caries_2", "Caries_3", "Caries_4", "Caries_5", "Caries_6"
+  )
+
+matrix <- matrix %>%
+  as.data.frame() %>%
+  tibble::column_to_rownames("Species")
+
+# Build clinical metadata
+clinical <- data.frame(
+  "samples" = c(
+    "CHX_1", "CHX_2", "CHX_3", "CHX_4", "CHX_5", "CHX_6",
+    "A5B5_1", "A5B5_2", "A5B5_3", "A5B5_4", "A5B5_5", "A5B5_6",
+    "Caries_1", "Caries_2", "Caries_3", "Caries_4", "Caries_5", "Caries_6"
+  ),
+  "group" = c(rep("CHX", 6), rep("A5B5", 6), rep("PBS", 6))
+)
+
+# Run ALDEx2
+clinical <- clinical %>% dplyr::filter(group %in% c("CHX", "A5B5"))
+matrix <- matrix[, clinical$samples]
+
+x <- aldex.clr(matrix, clinical$group, mc.samples = 128, verbose = FALSE)
+x.tt <- aldex.ttest(x, paired.test = FALSE, hist.plot = FALSE, verbose = FALSE)
+x.effect <- aldex.effect(x, verbose = FALSE)
+
+x.all <- data.frame(x.tt, x.effect)
+rownames(x.all) <- rownames(x.tt)
+
+out_dir <- "02.differential"
+fxx.create_and_setwd(file.path(root_path, res_folder, out_dir))
+
+prefix_name <- "A5B5_CHX-Aldex-"
+saveRDS(x, file = paste0(prefix_name, "x.Rds"))
+saveRDS(x.all, file = paste0(prefix_name, "x.all.Rds"))
+
+write_xlsx(
+  x.all %>% tibble::rownames_to_column("Species"),
+  path = paste0(prefix_name, "x.all.xlsx")
+)
+
+pdf(file = paste0(prefix_name, "MA-welch-.logAbundance_logDifference.pdf"), height = 4, width = 3.6)
+aldex.plot(
+  x.all,
+  type = "MA",
+  test = "welch",
+  xlab = "Log-ratio abundance",
+  ylab = "Difference",
+  called.col = "#9C0000"
+)
+dev.off()
+
+pdf(file = paste0(prefix_name, "MW-welch-.logAbundance_logDifference.pdf"), height = 4, width = 3.6)
+aldex.plot(
+  x.all,
+  type = "MW",
+  test = "welch",
+  cutoff = 1.5,
+  all.cex = 0.7,
+  called.cex = 1.1,
+  rare.col = "black",
+  called.col = "#8B0000"
+)
+dev.off()
+
+pdf(file = paste0(prefix_name, "MW-wilcox-.logAbundance_logDifference.pdf"), height = 4, width = 3.6)
+aldex.plot(
+  x.all,
+  type = "MW",
+  test = "wilcox",
+  cutoff = 1.5,
+  all.cex = 0.7,
+  called.cex = 1.1,
+  rare.col = "black",
+  called.col = "#8B0000"
+)
+dev.off()
+```
+```{r ALDEx differential analysis (PBS and A5B5)}
+##============================================================================##
+# Program: ALDEx2 differential analysis between PBS and A5B5
+##============================================================================##
+
+#---- Read matrix and clinical data
+setwd(file.path(root_path, res_folder, "01.count,matrix,clinical"))
+
+matrix <- readRDS("abundance_count_matrix.Rds") %>%
+  dplyr::select(
+    "Species",
+    "CHX_1", "CHX_2", "CHX_3", "CHX_4", "CHX_5", "CHX_6",
+    "A5B5_1", "A5B5_2", "A5B5_3", "A5B5_4", "A5B5_5", "A5B5_6",
+    "Caries_1", "Caries_2", "Caries_3", "Caries_4", "Caries_5", "Caries_6"
+  ) %>%
+  tibble::column_to_rownames("Species")
+
+abundance <- readRDS("abundance_percent_matrix.Rds") %>%
+  dplyr::mutate(
+    "CHX_1" = `CHX-1`, "CHX_2" = `CHX-2`, "CHX_3" = `CHX-3`,
+    "CHX_4" = `CHX-4`, "CHX_5" = `CHX-5`, "CHX_6" = `CHX-6`,
+    "A5B5_1" = `A5B5-1`, "A5B5_2" = `A5B5-2`, "A5B5_3" = `A5B5-3`,
+    "A5B5_4" = `A5B5-4`, "A5B5_5" = `A5B5-5`, "A5B5_6" = `A5B5-6`,
+    "Caries_1" = `Caries-1`, "Caries_2" = `Caries-2`, "Caries_3" = `Caries-3`,
+    "Caries_4" = `Caries-4`, "Caries_5" = `Caries-5`, "Caries_6" = `Caries-6`
+  )
+
+clinical <- readRDS("clinical.Rds")
+
+#---- Run ALDEx2
+clinical <- clinical %>% dplyr::filter(group %in% c("PBS", "A5B5"))
+matrix <- matrix[, clinical$samples]
+
+x <- aldex.clr(matrix, clinical$group, mc.samples = 128, verbose = TRUE)
+x.tt <- aldex.ttest(x, paired.test = FALSE, hist.plot = FALSE, verbose = FALSE)
+x.effect <- aldex.effect(x, verbose = FALSE)
+
+x.all <- data.frame(x.tt, x.effect)
+
+aldex.plot(
+  x.all,
+  type = "MA",
+  test = "welch",
+  xlab = "Log-ratio abundance",
+  ylab = "Difference",
+  called.col = "#9C0000"
+)
+
+aldex.plot(
+  x.all,
+  type = "MW",
+  test = "welch",
+  cutoff = 1.5,
+  all.cex = 0.7,
+  called.cex = 1.1,
+  rare.col = "black",
+  called.col = "#8B0000"
+)
+
+aldex.plot(
+  x.all,
+  type = "MW",
+  test = "wilcox",
+  cutoff = 1.5,
+  all.cex = 0.7,
+  called.cex = 1.1,
+  rare.col = "black",
+  called.col = "#8B0000"
+)
+
+out_dir <- "02.differential"
+fxx.create_and_setwd(file.path(root_path, res_folder, out_dir))
+
+prefix_name <- "A5B5_PBS-Aldex-"
+
+saveRDS(x, file = paste(prefix_name, "x.Rds"))
+saveRDS(x.all, file = paste(prefix_name, "x.all.Rds"))
+
+write_xlsx(
+  x.all %>% tibble::rownames_to_column("species"),
+  path = paste(prefix_name, "x.all.xlsx")
+)
+
+pdf(
+  file = paste(prefix_name, "MA-welch-.logAbundance_logDifference.pdf"),
+  height = 4,
+  width = 3.6
+)
+aldex.plot(
+  x.all,
+  type = "MA",
+  test = "welch",
+  xlab = "Log-ratio abundance",
+  ylab = "Difference",
+  called.col = "#9C0000"
+)
+dev.off()
+
+pdf(
+  file = paste(prefix_name, "MW-welch-.logAbundance_logDifference.pdf"),
+  height = 4,
+  width = 3.6
+)
+aldex.plot(
+  x.all,
+  type = "MW",
+  test = "welch",
+  cutoff = 1.5,
+  all.cex = 0.7,
+  called.cex = 1.1,
+  rare.col = "black",
+  called.col = "#8B0000"
+)
+dev.off()
+
+pdf(
+  file = paste(prefix_name, "MW-wilcox-.logAbundance_logDifference.pdf"),
+  height = 4,
+  width = 3.6
+)
+aldex.plot(
+  x.all,
+  type = "MW",
+  test = "wilcox",
+  cutoff = 1.5,
+  all.cex = 0.7,
+  called.cex = 1.1,
+  rare.col = "black",
+  called.col = "#8B0000"
+)
+dev.off()
+```
+
+```{r LEFSe re-visualization (PBS, A5B5)}
+##============================================================================##
+# Program: LEfSe volcano-style plot
+##============================================================================##
+library(tidyverse)
+library(readxl)
+library(ggplot2)
+library(ggrepel)
+
+setwd(file.path(root_path, data_folder, "./5.Meta_Statistic/C388460/LEfSe"))
+
+pbs_ab5_lefse <- readxl::read_xlsx(
+  "LEfSe_table.res.xlsx",
+  sheet = "LEfSe_table.res"
+)
+
+pbs_ab5_lefse.sig <- pbs_ab5_lefse[!is.na(pbs_ab5_lefse$LDA_value), ] %>%
+  mutate(p_value = as.numeric(`p-value`)) %>%
+  dplyr::filter(p_value < 0.05) %>%
+  dplyr::mutate(
+    target = sub(".*\\.", "", Biomarker)
+  )
+
+flip_targets <- c(
+  "s__Enterococcus_F_sp009933335",
+  "s__Enterococcus_F_saccharolyticus",
+  "g__Enterococcus_F",
+  "s__Alcaligenes_faecalis",
+  "f__Burkholderiaceae_C",
+  "g__Alcaligenes",
+  "s__Corynebacterium_glutamicum",
+  "g__Corynebacterium",
+  "o__Mycobacteriales",
+  "f__Mycobacteriaceae",
+  "c__Actinomycetia",
+  "p__Actinomycetota"
+)
+
+dt <- pbs_ab5_lefse.sig %>%
+  dplyr::select(target, p_value, LDA_value) %>%
+  dplyr::mutate(`-logPvalue` = -log10(p_value)) %>%
+  dplyr::mutate(
+    LDA_value = dplyr::if_else(target %in% flip_targets, -LDA_value, LDA_value)
+  ) %>%
+  dplyr::arrange(-LDA_value)
+
+p <- ggplot(
+  dt,
+  aes(x = `-logPvalue`, y = LDA_value, color = LDA_value > 0)
+) +
+  geom_point(size = 2.8, alpha = 0.18, stroke = 0) +
+  geom_point(size = 1.6, alpha = 0.7, stroke = 0) +
+  geom_text_repel(
+    data = subset(
+      dt,
+      target %in% c(
+        "s__Weissella_sagaensis",
+        "s__Alcaligenes_faecalis",
+        "s__Enterococcus_F_saccharolyticus"
+      )
+    ),
+    aes(label = target),
+    size = 5 / .pt,
+    color = "black",
+    box.padding = 0.2,
+    point.padding = 0.15,
+    segment.size = 0.75 * 0.35278,
+    max.overlaps = Inf
+  ) +
+  scale_color_manual(
+    name = NULL,
+    breaks = c(TRUE, FALSE),
+    labels = c(`TRUE` = "A5B5", `FALSE` = "PBS"),
+    values = c(`TRUE` = "#315E85", `FALSE` = "#8F5F9F")
+  ) +
+  labs(x = "-log10(p_value)", y = "LDA_value") +
+  theme_bw(base_size = 5) +
+  theme(
+    panel.grid = element_blank(),
+    panel.border = element_rect(
+      colour = "black",
+      fill = NA,
+      linewidth = 0.75 * 0.35278
+    ),
+    axis.line = element_blank(),
+    axis.ticks = element_line(linewidth = 0.75 * 0.35278),
+    axis.ticks.length = unit(1.5, "pt"),
+    axis.text = element_text(size = 5),
+    axis.title = element_text(size = 5),
+    plot.title = element_text(size = 5)
+  )
+
+p
+
+fxx.create_and_setwd(file.path(root_path, res_folder, "03.LEFSe"))
+```
+```{r LEFSe re-visualization (CHX, A5B5)}
+##============================================================================##
+# Program: LEfSe plot generation
+##============================================================================##
+library(tidyverse)
+library(readxl)
+library(ggplot2)
+library(ggrepel)
+
+# Read CHX vs A5B5 LEfSe results
+setwd(file.path(root_path, data_folder, "变链-宏基因/5.Meta_Statistic/C388461/LEfSe"))
+chx_ab5_lefse <- readxl::read_xlsx("LEfSe_table.res.xlsx", sheet = "LEfSe_table.res")
+
+chx_ab5_lefse.sig <- chx_ab5_lefse[!is.na(chx_ab5_lefse$LDA_value), ] %>%
+  mutate(p_value = as.numeric(`p-value`)) %>%
+  dplyr::filter(p_value < 0.05) %>%
+  dplyr::mutate(
+    target = sub(".*\\.", "", Biomarker)
+  )
+
+flip_targets <- c(
+  "g__Glutamicibacter", "s__Enterococcus_F_saccharolyticus", "o__Verrucomicrobiales",
+  "g__Akkermansia", "f__Akkermansiaceae", "s__Akkermansia_muciniphila",
+  "c__Verrucomicrobiae", "p__Verrucomicrobiota", "g__Enterococcus_F",
+  "s__Aerococcus_urinaeequi", "g__Aerococcus", "f__Aerococcaceae",
+  "s__Bifidobacterium_globosum", "g__Bifidobacterium", "f__Bifidobacteriaceae",
+  "g__UBA3263", "s__UBA3263_sp001689615", "o__Actinomycetales",
+  "o__Erysipelotrichales", "f__Erysipelotrichaceae",
+  "s__Faecalibaculum_rodentium", "g__Faecalibaculum",
+  "s__Acinetobacter_radioresistens", "s__Corynebacterium_stationis",
+  "s__Alcaligenes_faecalis", "g__Alcaligenes", "f__Burkholderiaceae_C",
+  "f__Mycobacteriaceae", "o__Mycobacteriales", "g__Corynebacterium",
+  "o__Burkholderiales", "c__Actinomycetia", "p__Actinomycetota"
+)
+
+dt <- chx_ab5_lefse.sig %>%
+  dplyr::select(target, p_value, LDA_value) %>%
+  dplyr::mutate(`-logPvalue` = -log10(p_value)) %>%
+  dplyr::mutate(
+    LDA_value = dplyr::if_else(target %in% flip_targets, -LDA_value, LDA_value)
+  ) %>%
+  dplyr::arrange(-LDA_value)
+
+# Plot
+p <- ggplot(
+  dt,
+  aes(x = `-logPvalue`, y = LDA_value, color = LDA_value > 0)
+) +
+  geom_point(size = 2.8, alpha = 0.18, stroke = 0) +
+  geom_point(size = 1.6, alpha = 0.7, stroke = 0) +
+  geom_text_repel(
+    data = subset(
+      dt,
+      target %in% c(
+        "s__Weissella_cibaria",
+        "s__Enterococcus_F_saccharolyticus",
+        "s__Acinetobacter_radioresistens",
+        "s__Alcaligenes_faecalis"
+      )
+    ),
+    aes(label = target),
+    size = 5 / .pt,
+    color = "black",
+    box.padding = 0.2,
+    point.padding = 0.15,
+    segment.size = 0.75 * 0.35278,
+    max.overlaps = Inf
+  ) +
+  scale_color_manual(
+    name = NULL,
+    breaks = c(TRUE, FALSE),
+    labels = c(`TRUE` = "A5B5", `FALSE` = "CHX"),
+    values = c(`TRUE` = "#315E85", `FALSE` = "#DEAE1B")
+  ) +
+  labs(x = "-log10(p_value)", y = "LDA_value") +
+  theme_bw(base_size = 5) +
+  theme(
+    panel.grid = element_blank(),
+    panel.border = element_rect(
+      colour = "black",
+      fill = NA,
+      linewidth = 0.75 * 0.35278
+    ),
+    axis.line = element_blank(),
+    axis.ticks = element_line(linewidth = 0.75 * 0.35278),
+    axis.ticks.length = unit(1.5, "pt"),
+    axis.text = element_text(size = 5),
+    axis.title = element_text(size = 5),
+    plot.title = element_text(size = 5)
+  )
+
+p
+
+# Save figure
+fxx.create_and_setwd(file.path(root_path, res_folder, "03.LEFSe"))
+```
+
+```{r Construction differential analysis sheet}
+# Load matrix and clinical data
+setwd(file.path(root_path, res_folder, "01.count,matrix,clinical"))
+
+matrix <- readRDS("abundance_count_matrix.Rds") %>%
+  dplyr::select(
+    "Species",
+    "CHX_1", "CHX_2", "CHX_3", "CHX_4", "CHX_5", "CHX_6",
+    "A5B5_1", "A5B5_2", "A5B5_3", "A5B5_4", "A5B5_5", "A5B5_6",
+    "Caries_1", "Caries_2", "Caries_3", "Caries_4", "Caries_5", "Caries_6"
+  )
+
+abundance <- readRDS("abundance_percent_matrix.Rds") %>%
+  dplyr::mutate(
+    "CHX_1" = `CHX-1`, "CHX_2" = `CHX-2`, "CHX_3" = `CHX-3`,
+    "CHX_4" = `CHX-4`, "CHX_5" = `CHX-5`, "CHX_6" = `CHX-6`,
+    "A5B5_1" = `A5B5-1`, "A5B5_2" = `A5B5-2`, "A5B5_3" = `A5B5-3`,
+    "A5B5_4" = `A5B5-4`, "A5B5_5" = `A5B5-5`, "A5B5_6" = `A5B5-6`,
+    "Caries_1" = `Caries-1`, "Caries_2" = `Caries-2`, "Caries_3" = `Caries-3`,
+    "Caries_4" = `Caries-4`, "Caries_5" = `Caries-5`, "Caries_6" = `Caries-6`
+  )
+
+clinical <- readRDS("clinical.Rds")
+
+
+# Differential analysis summary: A5B5 vs CHX
+setwd(file.path(root_path, res_folder, "02.differential"))
+degs_chx_a5b5 <- readRDS("A5B5_CHX-Aldex- x.all.Rds")
+
+targets <- degs_chx_a5b5 %>%
+  dplyr::filter(we.ep < 0.05) %>%
+  tibble::rownames_to_column("Species") %>%
+  dplyr::pull(Species)
+
+target_abundance <- abundance %>%
+  dplyr::filter(Species %in% targets) %>%
+  dplyr::select(
+    "Species",
+    "CHX_1", "CHX_2", "CHX_3", "CHX_4", "CHX_5", "CHX_6",
+    "A5B5_1", "A5B5_2", "A5B5_3", "A5B5_4", "A5B5_5", "A5B5_6",
+    "Caries_1", "Caries_2", "Caries_3", "Caries_4", "Caries_5", "Caries_6"
+  ) %>%
+  tibble::column_to_rownames("Species")
+
+larger1_target <- colnames(t(target_abundance))[
+  apply(t(target_abundance), 2, max, na.rm = TRUE) > 0.01
+]
+
+t <- list(
+  "pval0.05-Cutoff1.5" = degs_chx_a5b5 %>%
+    tibble::rownames_to_column("Species") %>%
+    dplyr::filter(Species %in% rownames(target_abundance)) %>%
+    dplyr::arrange(effect) %>%
+    as.data.frame(),
+  
+  "pval0.05-Cutoff1.5-Abd0.01" = degs_chx_a5b5 %>%
+    tibble::rownames_to_column("Species") %>%
+    dplyr::filter(Species %in% larger1_target) %>%
+    dplyr::arrange(effect) %>%
+    as.data.frame(),
+  
+  "Adj.pval0.05-Cutoff1.5" = degs_chx_a5b5 %>%
+    tibble::rownames_to_column("Species") %>%
+    dplyr::filter(we.eBH < 0.05) %>%
+    dplyr::arrange(effect) %>%
+    as.data.frame(),
+  
+  "Adj.pval0.05-Cutoff1.5-Abd.01" = degs_chx_a5b5 %>%
+    tibble::rownames_to_column("Species") %>%
+    dplyr::filter(Species %in% larger1_target) %>%
+    dplyr::filter(we.eBH < 0.05) %>%
+    dplyr::arrange(effect) %>%
+    as.data.frame()
+)
+
+fxx.create_and_setwd(file.path(root_path, res_folder, "02.differential"))
+library(openxlsx)
+
+wb <- createWorkbook()
+for (nm in names(t)) {
+  addWorksheet(wb, sheetName = nm)
+  writeData(wb, sheet = nm, x = t[[nm]], withFilter = TRUE)
+  freezePane(wb, sheet = nm, firstRow = TRUE)
+  setColWidths(wb, sheet = nm, cols = 1:ncol(t[[nm]]), widths = "auto")
+}
+saveWorkbook(wb, file = "A5B5_vs_CHX_Sig.DEMetag.xlsx", overwrite = TRUE)
+
+
+# Differential analysis summary: A5B5 vs PBS
+setwd(file.path(root_path, res_folder, "02.differential"))
+degs_pbs_a5b5 <- readRDS("A5B5_PBS-Aldex- x.all.Rds")
+
+targets <- degs_pbs_a5b5 %>%
+  dplyr::filter(we.ep < 0.05) %>%
+  tibble::rownames_to_column("Species") %>%
+  dplyr::pull(Species)
+
+target_abundance <- abundance %>%
+  dplyr::filter(Species %in% targets) %>%
+  dplyr::select(
+    "Species",
+    "CHX_1", "CHX_2", "CHX_3", "CHX_4", "CHX_5", "CHX_6",
+    "A5B5_1", "A5B5_2", "A5B5_3", "A5B5_4", "A5B5_5", "A5B5_6",
+    "Caries_1", "Caries_2", "Caries_3", "Caries_4", "Caries_5", "Caries_6"
+  ) %>%
+  tibble::column_to_rownames("Species")
+
+larger1_target <- colnames(t(target_abundance))[
+  apply(t(target_abundance), 2, max, na.rm = TRUE) > 0.01
+]
+
+t <- list(
+  "pval0.05-Cutoff1.5" = degs_pbs_a5b5 %>%
+    tibble::rownames_to_column("Species") %>%
+    dplyr::filter(Species %in% rownames(target_abundance)) %>%
+    dplyr::arrange(effect) %>%
+    as.data.frame(),
+  
+  "pval0.05-Cutoff1.5-Abd0.01" = degs_pbs_a5b5 %>%
+    tibble::rownames_to_column("Species") %>%
+    dplyr::filter(Species %in% larger1_target) %>%
+    dplyr::arrange(effect) %>%
+    as.data.frame(),
+  
+  "Adj.pval0.05-Cutoff1.5" = degs_pbs_a5b5 %>%
+    tibble::rownames_to_column("Species") %>%
+    dplyr::filter(we.eBH < 0.05) %>%
+    dplyr::arrange(effect) %>%
+    as.data.frame(),
+  
+  "Adj.pval0.05-Cutoff1.5-Abd.01" = degs_pbs_a5b5 %>%
+    tibble::rownames_to_column("Species") %>%
+    dplyr::filter(Species %in% larger1_target) %>%
+    dplyr::filter(we.eBH < 0.05) %>%
+    dplyr::arrange(effect) %>%
+    as.data.frame()
+)
+
+fxx.create_and_setwd(file.path(root_path, res_folder, "02.differential"))
+library(openxlsx)
+
+wb <- createWorkbook()
+for (nm in names(t)) {
+  addWorksheet(wb, sheetName = nm)
+  writeData(wb, sheet = nm, x = t[[nm]], withFilter = TRUE)
+  freezePane(wb, sheet = nm, firstRow = TRUE)
+  setColWidths(wb, sheet = nm, cols = 1:ncol(t[[nm]]), widths = "auto")
+}
+saveWorkbook(wb, file = "A5B5_vs_PBS_Sig.DEMetag.xlsx", overwrite = TRUE)
+```

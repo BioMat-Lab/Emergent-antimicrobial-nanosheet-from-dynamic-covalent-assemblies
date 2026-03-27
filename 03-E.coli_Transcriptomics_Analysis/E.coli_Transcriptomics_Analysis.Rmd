@@ -1,0 +1,1207 @@
+```{r Matrix and Clinical obj read in }
+#---- Read in RNA-seq data matrix
+setwd(file.path(root_path, data_folder, "./DZOE2023051321_XMSH_202511_35155/result/1.3.gene_expression"))
+fpkm <- read_xlsx("FPKM_anno.xlsx")
+fpkm_mat <- fpkm %>% 
+  dplyr::select("PBS-1", "PBS-2", "PBS-3",
+                "CHX1-1", "CHX1-2", "CHX1-3",
+                "AB5-1", "AB5-2", "AB5-3",
+                "gene_symbol") %>%
+  dplyr::select("gene_symbol", everything()) 
+
+sum(is.na(fpkm_mat$gene_symbol))
+sum(is.nan(fpkm_mat$gene_symbol))
+sum(is.null(fpkm_mat$gene_symbol))
+
+sum( fpkm_mat$gene_symbol == "")
+
+which(is.na(fpkm_mat$gene_symbol)) 
+fpkm_mat <- fpkm_mat[-4045, ]
+sum(is.na(fpkm_mat$gene_symbol))
+
+sum(duplicated(fpkm_mat$gene_symbol))
+
+fpkm_matrix <- fpkm_mat %>%
+  tibble::column_to_rownames("gene_symbol") %>%
+  as.data.frame(check.names = FALSE) %>%
+  mutate(across(everything(), ~ parse_number(as.character(.x)))) %>%
+  as.matrix()
+max(fpkm_matrix)
+min(fpkm_matrix)
+
+#---- log transform
+fpkm_log_matrix <- log2(fpkm_matrix+1)
+max(fpkm_log_matrix)
+min(fpkm_log_matrix)
+
+#--- clinical obj
+cli <- data.frame(
+  "samples" = c("PBS-1", "PBS-2", "PBS-3",
+                "CHX1-1", "CHX1-2", "CHX1-3",
+                "AB5-1", "AB5-2", "AB5-3"), 
+  "group" = c(rep("PBS", 3), rep("CHX", 3), rep("A5B5", 3))
+)
+
+fxx.create_and_setwd(file.path(root_path, res_folder, "RNA.01.matrix+clinical.format"))
+saveRDS(fpkm_log_matrix, file = "fpkm_log_matrix.Rds")
+saveRDS(cli, file = "clinical.Rds")
+saveRDS(fpkm_matrix, "fpkm_matrix.Rds")
+```
+```{r RNA Differential expression analysis result read in}
+##============================================================================##
+# Program: DEGs read in, compile and save
+##============================================================================##
+#---- Read in RNA-seq DEGs result
+setwd(file.path(root_path, data_folder, 
+       "./DZOE2023051321_XMSH_202511_35155/result/1.4.different_expressed_gene"))
+
+degs_list_origin <- list(
+  "CHX_vs_A5B5" = read_xlsx("AB5-vs-CHX/AB5-vs-CHX-all.gene.xlsx"),
+  "PBS_vs_A5B5" = read_xlsx("AB5-vs-PBS/AB5-vs-PBS-all.gene.xlsx"),
+  "PBS_vs_CHX"  = read_xlsx("CHX1-vs-PBS/CHX1-vs-PBS-all.gene.xlsx")
+)
+
+degs_list <- list(
+  "CHX_vs_A5B5" = degs_list_origin$CHX_vs_A5B5 %>% 
+    dplyr::select("gene_symbol",
+                    "BaseMean_control_CHX","BaseMean_case_AB5",
+                    "FoldChange", "log2FoldChange", 
+                    "p-value", "q-value", "Regulation"),
+  "PBS_vs_A5B5" = degs_list_origin$PBS_vs_A5B5 %>%
+    dplyr::select("gene_symbol",
+                    "BaseMean_control_PBS","BaseMean_case_AB5",
+                    "FoldChange", "log2FoldChange", 
+                    "p-value", "q-value", "Regulation"),
+  "PBS_vs_CHX"  = degs_list_origin$PBS_vs_CHX %>%
+    dplyr::select("gene_symbol",
+                    "BaseMean_control_PBS","BaseMean_case_CHX1",
+                    "FoldChange", "log2FoldChange", 
+                    "p-value", "q-value", "Regulation")
+)
+
+
+sig_degs_list <- imap(degs_list, ~{
+  x <- .x
+  if (is.null(x) || nrow(x) == 0) return(tibble())
+  x %>% dplyr::filter(`q-value` < 0.05)
+})
+
+library(tidyverse)
+
+genes_down_both <- intersect(
+  sig_degs_list$CHX_vs_A5B5 %>% dplyr::filter(Regulation == "Down") %>% dplyr::pull(gene_symbol),
+  sig_degs_list$PBS_vs_A5B5 %>% dplyr::filter(Regulation == "Down") %>% dplyr::pull(gene_symbol)
+)
+
+genes_down_both <- sort(unique(genes_down_both))
+genes_down_both
+
+#---- save
+setwd(file.path(root_path, res_folder, "RNA.02.degs"))
+saveRDS(degs_list_origin, "PBS,CHX,AB5.degs_list.Rds")
+saveRDS(degs_list, "PBS,CHX,AB5.degs_list(q_sig).Rds")
+
+saveRDS(genes_down_both, "2Down_degs(AB5-Vs-PBS,CHX).Rds")
+```
+```{r Pathway enrichment analysis of common DEGs (KEGG, GO database)}
+setwd(file.path(root_path, res_folder, "RNA.02.degs"))
+genes_down_both <- readRDS("2Down_degs(AB5-Vs-PBS,CHX).Rds")
+
+target_genes <- genes_down_both
+#---- KEGG enrichment analysis
+# ID transform
+gene_entrez <- bitr(
+  target_genes,
+  fromType = "SYMBOL",
+  toType = "ENTREZID",
+  OrgDb = org.EcK12.eg.db
+) %>%
+  dplyr::distinct(ENTREZID, .keep_all = TRUE)
+
+
+gene_entrez_background <- bitr(
+  degs_list$CHX_vs_A5B5$gene_symbol,
+  fromType = "SYMBOL",
+  toType = "ENTREZID",
+  OrgDb = org.EcK12.eg.db
+) %>%
+  dplyr::distinct(ENTREZID, .keep_all = TRUE)
+
+
+# KEGG enrichment analysis
+kegg_enrich <- enrichKEGG(
+  gene = gene_entrez$ENTREZID,
+  organism = "eco",
+  keyType = "ncbi-geneid",
+  pvalueCutoff = 1,
+  qvalueCutoff = 1
+)
+
+library(dplyr)
+library(stringr)
+library(purrr)
+
+kegg_enrich_df <- data.frame(kegg_enrich)
+id2symbol <- setNames(gene_entrez$SYMBOL, gene_entrez$ENTREZID)
+
+kegg_enrich_df <- kegg_enrich_df %>%
+  mutate(
+    geneID = as.character(geneID),
+    GeneSymbol = map_chr(
+      str_split(geneID, "/"),
+      ~ {
+        ids <- str_trim(.x)
+        syms <- id2symbol[ids]
+        
+        paste(ifelse(is.na(syms), ids, syms), collapse = "/")
+      }
+    )
+  )
+
+out_dir <- "RNA.03.Enrich"
+setwd(file.path(root_path, res_folder, out_dir))
+writexl::write_xlsx(kegg_enrich_df, path = "Unique_down_in_A5B5.xlsx")
+
+
+##======================##
+#program: Gene SYMBOL -> GO enrichment (MF/BP/CC)
+##======================##
+
+library(tidyverse)
+library(AnnotationDbi)
+library(org.EcK12.eg.db)
+library(GO.db)
+library(clusterProfiler)
+
+#===== Part 1. SYMBOL 
+gene_symbol <- target_genes %>% as.character() %>% unique()
+universe_symbol <- degs_list$CHX_vs_A5B5$gene_symbol %>% as.character() %>% unique()
+
+#===== Part 2. SYMBOL -> GO database
+go_all_sym <- AnnotationDbi::select(
+  org.EcK12.eg.db,
+  keys = universe_symbol,
+  keytype = "SYMBOL",
+  columns = c("SYMBOL","GO","ONTOLOGY")
+) %>%
+  as_tibble() %>%
+  filter(!is.na(GO), !is.na(ONTOLOGY)) %>%
+  distinct()
+
+TERM2NAME <- AnnotationDbi::select(
+  GO.db,
+  keys = unique(go_all_sym$GO),
+  keytype = "GOID",
+  columns = c("GOID","TERM")
+) %>%
+  as_tibble() %>%
+  transmute(term = GOID, name = TERM) %>%
+  distinct()
+
+TERM2GENE_MF <- go_all_sym %>% filter(ONTOLOGY == "MF") %>% transmute(term = GO, gene = SYMBOL) %>% distinct()
+TERM2GENE_BP <- go_all_sym %>% filter(ONTOLOGY == "BP") %>% transmute(term = GO, gene = SYMBOL) %>% distinct()
+TERM2GENE_CC <- go_all_sym %>% filter(ONTOLOGY == "CC") %>% transmute(term = GO, gene = SYMBOL) %>% distinct()
+
+TERM2NAME_MF <- TERM2NAME %>% semi_join(TERM2GENE_MF %>% distinct(term), by = "term")
+TERM2NAME_BP <- TERM2NAME %>% semi_join(TERM2GENE_BP %>% distinct(term), by = "term")
+TERM2NAME_CC <- TERM2NAME %>% semi_join(TERM2GENE_CC %>% distinct(term), by = "term")
+
+#===== Part 3. Pathway annotation
+ego_mf <- enricher(
+  gene = gene_symbol,
+  universe = universe_symbol,
+  TERM2GENE = TERM2GENE_MF,
+  TERM2NAME = TERM2NAME_MF,
+  pAdjustMethod = "BH",
+  pvalueCutoff = 1,
+  qvalueCutoff = 1,
+  minGSSize = 5,
+  maxGSSize = 500
+)
+
+ego_bp <- enricher(
+  gene = gene_symbol, 
+  universe = universe_symbol,
+  TERM2GENE = TERM2GENE_BP,
+  TERM2NAME = TERM2NAME_BP,
+  pAdjustMethod = "BH",
+  pvalueCutoff = 1,
+  qvalueCutoff = 1,
+  minGSSize = 5,
+  maxGSSize = 500
+)
+
+ego_cc <- enricher(
+  gene = gene_symbol,
+  universe = universe_symbol,
+  TERM2GENE = TERM2GENE_CC,
+  TERM2NAME = TERM2NAME_CC,
+  pAdjustMethod = "BH",
+  pvalueCutoff = 1,
+  qvalueCutoff = 1,
+  minGSSize = 5,
+  maxGSSize = 500
+)
+
+mf_res <- if (is.null(ego_mf)) tibble() else as_tibble(ego_mf@result)
+bp_res <- if (is.null(ego_bp)) tibble() else as_tibble(ego_bp@result)
+cc_res <- if (is.null(ego_cc)) tibble() else as_tibble(ego_cc@result)
+
+mf_res
+bp_res
+cc_res
+
+go_res <- bind_rows(
+  mf_res %>% mutate(Cluster = "MF"),
+  bp_res %>% mutate(Cluster = "BP"),
+  cc_res %>% mutate(Cluster = "CC")
+) %>%
+  relocate(Cluster, .before = 1)
+go_res
+
+
+library(tidyverse)
+library(writexl)
+
+xlsx_out <- "GO_enrichment_results.xlsx"
+
+writexl::write_xlsx(
+  list(
+    MF = mf_res,
+    BP = bp_res,
+    CC = cc_res,
+    GO_all = go_res
+  ),
+  path = xlsx_out
+)
+```
+
+```{r Color setting}
+# Color setting
+my_colors <- c(
+  "PBS" =  "#8F5F9F", # Pg: Disease
+  "CHX" =  "#E7B30B", # Positive control
+  "A5B5" = "#315E85"  # Treatment
+)
+```
+```{r PCA Visual}
+##============================================================================##
+# Program: RNA PCA visualization
+##============================================================================##
+
+setwd(file.path(root_path, res_folder, "RNA.01.matrix+clinical.format"))
+matrix <- readRDS("fpkm_log_matrix.Rds")
+clinical <- readRDS("clinical.Rds") %>%
+  mutate(Group = group)
+
+clinical$Group <- factor(clinical$Group, levels = c("PBS", "CHX", "A5B5"))
+
+out_dir <- "RNA.01-2.RNA PCA"
+fxx.create_and_setwd(file.path(root_path, res_folder, out_dir))
+
+setwd(file.path(root_path, code_folder, "lib"))
+source("fxx.plot_tsne.R")
+source("fxx.plot_pca.R")
+source("fxx.plot_umap.R")
+
+my_colors <- c(
+  "PBS" = "#8F5F9F",
+  "CHX" = "#E7B30B",
+  "A5B5" = "#315E85"
+)
+
+set.seed(11)
+library(Rtsne)
+
+matrix_t <- t(matrix)
+pca_out <- prcomp(matrix_t, scale = TRUE)
+pca_data <- data.frame(
+  PC1 = pca_out$x[, 1],
+  PC2 = pca_out$x[, 2],
+  Group = clinical$Group
+)
+
+pca_plots <- fxx.plot_pca(pca_data, group = "Group", mycol = my_colors)
+
+plot_names <- c(
+  "base", "colored", "shaped", "ellipse",
+  "filled_ellipse", "filled_bordered_ellipse",
+  "firework_base", "firework_centroid", "firework_ellipse"
+)
+
+out_dir <- "RNA.01-2.RNA PCA"
+for (plot_name in plot_names) {
+  plot_obj <- pca_plots[[plot_name]]
+  fxx.save_ggplot2_obj2res(
+    final_folder = out_dir,
+    p = plot_obj,
+    p_filename = paste0("PCA_All_samples_", plot_name),
+    width = 3.4,
+    height = 2.7
+  )
+}
+
+pca_var_df <- tibble::tibble(
+  PC = paste0("PC", seq_along(pca_out$sdev)),
+  var = pca_out$sdev^2
+) %>%
+  dplyr::mutate(
+    var_ratio = var / sum(var),
+    var_pct = var_ratio * 100,
+    cum_pct = cumsum(var_pct)
+  ) %>%
+  dplyr::arrange(dplyr::desc(var_pct))
+
+pca_var_df
+
+pc <- 1L
+pc_name <- paste0("PC", pc)
+
+pc1_contrib <- tibble::tibble(
+  Accession = rownames(pca_out$rotation),
+  loading = pca_out$rotation[, pc_name],
+  contrib = loading^2
+) %>%
+  dplyr::arrange(dplyr::desc(contrib))
+
+pc1_contrib
+
+accession_df <- mat %>%
+  dplyr::select(Accession, `Gene Name`)
+accession_df <- accession_df[!duplicated(accession_df$Accession), ]
+
+accession_df.gene_name.column <- accession_df %>%
+  dplyr::filter(Accession %in% pc1_contrib$Accession) %>%
+  dplyr::pull(`Gene Name`)
+
+pc1_contrib <- pc1_contrib %>%
+  dplyr::mutate(genes = accession_df.gene_name.column)
+
+setwd(file.path(root_path, res_folder, out_dir))
+writexl::write_xlsx(pc1_contrib, path = "pc1_contrib.xlsx")
+
+pcs <- paste0("PC", 1:2)
+top_n <- 50
+
+pc_contrib_multi <- purrr::map_dfr(pcs, function(pc_name) {
+  tibble::tibble(
+    Accession = rownames(pca_out$rotation),
+    PC = pc_name,
+    loading = pca_out$rotation[, pc_name],
+    contrib = loading^2
+  )
+}) %>%
+  dplyr::group_by(PC) %>%
+  dplyr::arrange(dplyr::desc(contrib), .by_group = TRUE) %>%
+  dplyr::slice_head(n = top_n) %>%
+  dplyr::ungroup()
+
+pc_contrib_multi
+```
+```{r Volcano plot of comparision groups}
+##============================================================================##
+# Program: Differential expression volcano plot (CHX_vs_A5B5)
+##============================================================================##
+
+library(dplyr)
+library(ggplot2)
+library(ggrepel)
+
+my_colors <- c(
+  "PBS" = "#8F5F9F",
+  "CHX" = "#E7B30B",
+  "A5B5" = "#315E85"
+)
+
+fxx.create_and_setwd(file.path(root_path, res_folder, "RNA.02.degs"))
+degs_list <- readRDS("PBS,CHX,AB5.degs_list(q_sig).Rds")
+
+df <- degs_list[["CHX_vs_A5B5"]] %>%
+  rename(
+    gene = gene_symbol,
+    log2FC = log2FoldChange,
+    qvalue = `q-value`
+  ) %>%
+  filter(!is.na(log2FC), !is.na(qvalue))
+
+q_thresh <- 0.05
+
+df <- df %>%
+  mutate(
+    significant = qvalue < q_thresh,
+    regulation = case_when(
+      significant & log2FC > 0 ~ "Up",
+      significant & log2FC < 0 ~ "Down",
+      TRUE ~ "NotSig"
+    ),
+    color = case_when(
+      regulation == "Up" ~ my_colors["A5B5"],
+      regulation == "Down" ~ my_colors["CHX"],
+      regulation == "NotSig" ~ "grey80"
+    )
+  )
+
+n_up <- df %>% filter(regulation == "Up") %>% nrow()
+n_down <- df %>% filter(regulation == "Down") %>% nrow()
+n_total_sig <- df %>% filter(significant) %>% nrow()
+
+main_title <- "Experiment A5B5, Control CHX"
+
+x_min <- min(df$log2FC, na.rm = TRUE)
+x_max <- max(df$log2FC, na.rm = TRUE)
+y_vals <- -log10(df$qvalue)
+y_min <- min(y_vals, na.rm = TRUE)
+y_max <- max(y_vals, na.rm = TRUE)
+
+round_down_05 <- function(x) {
+  floor(x * 2) / 2
+}
+
+round_up_05 <- function(x) {
+  ceiling(x * 2) / 2
+}
+
+x_lim <- c(round_down_05(x_min), round_up_05(x_max))
+y_lim <- c(round_down_05(y_min), round_up_05(y_max))
+
+p_volcano_auto <- ggplot(df, aes(x = log2FC, y = y_vals)) +
+  geom_point(aes(color = color), size = 1.5, alpha = 0.8) +
+  scale_color_identity() +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "black", linewidth = 0.75) +
+  geom_hline(yintercept = -log10(q_thresh), linetype = "dashed", color = "black", linewidth = 0.75) +
+  labs(
+    x = "Log2 Fold Change",
+    y = "-Log10(p.adj)",
+    title = main_title
+  ) +
+  coord_cartesian(xlim = x_lim, ylim = y_lim) +
+  theme_minimal() +
+  theme(
+    legend.position = "none",
+    axis.text = element_text(color = "#000000", size = 6),
+    axis.title = element_text(color = "#000000", size = 6),
+    plot.title = element_text(size = 6, face = "bold"),
+    plot.subtitle = element_text(size = 6),
+    panel.grid = element_blank(),
+    panel.border = element_rect(color = "black", fill = NA, linewidth = 0.75),
+    panel.background = element_rect(fill = "white", colour = NA)
+  )
+
+p_volcano_without_vline_auto <- ggplot(df, aes(x = log2FC, y = y_vals)) +
+  geom_point(aes(color = color), size = 1.5, alpha = 0.8) +
+  scale_color_identity() +
+  labs(
+    x = "Log2 Fold Change",
+    y = "-Log10(p.adj)",
+    title = main_title
+  ) +
+  coord_cartesian(xlim = x_lim, ylim = y_lim) +
+  theme_minimal() +
+  theme(
+    legend.position = "none",
+    axis.text = element_text(color = "#000000", size = 6),
+    axis.title = element_text(color = "#000000", size = 6),
+    plot.title = element_text(size = 6, face = "bold"),
+    plot.subtitle = element_text(size = 6),
+    panel.grid = element_blank(),
+    panel.border = element_rect(color = "black", fill = NA, linewidth = 0.75),
+    panel.background = element_rect(fill = "white", colour = NA)
+  )
+
+out_dir <- "RNA.02.degs-02.VolPlot"
+setwd(file.path(root_path, res_folder, out_dir))
+
+```
+```{r RNA differential expression analysis, Volcano plot and summary}
+##============================================================================##
+# Program: RNA differential expression analysis
+##============================================================================##
+
+library(dplyr)
+library(ggplot2)
+library(ggrepel)
+
+fxx.create_and_setwd(file.path(root_path, res_folder, "RNA.02.degs"))
+degs_list <- readRDS("PBS,CHX,AB5.degs_list(q_sig).Rds")
+
+my_colors <- c(
+  "PBS" = "#8F5F9F",
+  "CHX" = "#E7B30B",
+  "A5B5" = "#315E85"
+)
+
+fxx.plot_volcano_for_contrast <- function(
+    list_obj = degs_list,
+    contrast_name = "Healthy_Vs_Disease",
+    gene_symbol = "gene_symbol",
+    log2FoldChange = "log2FoldChange"
+) {
+  df <- list_obj[[contrast_name]] %>%
+    rename(
+      gene = gene_symbol,
+      log2FC = log2FoldChange,
+      qvalue = `q-value`
+    ) %>%
+    filter(!is.na(log2FC), !is.na(qvalue))
+
+  q_thresh <- 0.05
+  df <- df %>%
+    mutate(
+      significant = qvalue < q_thresh,
+      regulation = case_when(
+        significant & log2FC > 0 ~ "Up",
+        significant & log2FC < 0 ~ "Down",
+        TRUE ~ "NotSig"
+      ),
+      color = case_when(
+        regulation == "Up" ~ my_colors[sapply(strsplit(contrast_name, "_vs_"), `[`, 2)],
+        regulation == "Down" ~ my_colors[sapply(strsplit(contrast_name, "_vs_"), `[`, 1)],
+        regulation == "NotSig" ~ "grey80"
+      )
+    )
+
+  x_min <- min(df$log2FC, na.rm = TRUE)
+  x_max <- max(df$log2FC, na.rm = TRUE)
+  y_vals <- -log10(df$qvalue)
+  y_min <- min(y_vals, na.rm = TRUE)
+  y_max <- max(y_vals, na.rm = TRUE)
+
+  round_down_05 <- function(x) floor(x * 2) / 2
+  round_up_05 <- function(x) ceiling(x * 2) / 2
+
+  x_lim <- c(round_down_05(x_min), round_up_05(x_max))
+  y_lim <- c(round_down_05(y_min), round_up_05(y_max))
+
+  main_title <- paste0(
+    "Experiment ", strsplit(contrast_name, "_vs_")[[1]][2],
+    ", Control ", strsplit(contrast_name, "_vs_")[[1]][1]
+  )
+
+  p <- ggplot(df, aes(x = log2FC, y = y_vals)) +
+    geom_point(aes(color = color), size = 1.5, alpha = 0.8) +
+    scale_color_identity() +
+    geom_vline(xintercept = 0, linetype = "dashed", color = "black", linewidth = 0.75) +
+    geom_hline(yintercept = -log10(q_thresh), linetype = "dashed", color = "black", linewidth = 0.75) +
+    labs(
+      x = "Log2 Fold Change",
+      y = "-Log10(p.adj)",
+      title = main_title
+    ) +
+    coord_cartesian(xlim = x_lim, ylim = y_lim) +
+    theme_minimal() +
+    theme(
+      legend.position = "none",
+      axis.text = element_text(color = "#000000", size = 6),
+      axis.title = element_text(color = "#000000", size = 6),
+      plot.title = element_text(size = 6, face = "bold"),
+      plot.subtitle = element_text(size = 6),
+      panel.grid = element_blank(),
+      panel.border = element_rect(color = "black", fill = NA, linewidth = 0.75),
+      panel.background = element_rect(fill = "white", colour = NA)
+    )
+
+  return(p)
+}
+
+fxx.plot_volcano_for_contrast.NoVline <- function(
+    list_obj = degs_list,
+    contrast_name = "Healthy_Vs_Disease",
+    gene_symbol = "gene_symbol",
+    log2FoldChange = "log2FoldChange"
+) {
+  df <- list_obj[[contrast_name]] %>%
+    rename(
+      gene = gene_symbol,
+      log2FC = log2FoldChange,
+      qvalue = `q-value`
+    ) %>%
+    filter(!is.na(log2FC), !is.na(qvalue))
+
+  q_thresh <- 0.05
+  df <- df %>%
+    mutate(
+      significant = qvalue < q_thresh,
+      regulation = case_when(
+        significant & log2FC > 0 ~ "Up",
+        significant & log2FC < 0 ~ "Down",
+        TRUE ~ "NotSig"
+      ),
+      color = case_when(
+        regulation == "Up" ~ my_colors[sapply(strsplit(contrast_name, "_vs_"), `[`, 2)],
+        regulation == "Down" ~ my_colors[sapply(strsplit(contrast_name, "_vs_"), `[`, 1)],
+        regulation == "NotSig" ~ "grey80"
+      )
+    )
+
+  x_min <- min(df$log2FC, na.rm = TRUE)
+  x_max <- max(df$log2FC, na.rm = TRUE)
+  y_vals <- -log10(df$qvalue)
+  y_min <- min(y_vals, na.rm = TRUE)
+  y_max <- max(y_vals, na.rm = TRUE)
+
+  round_down_05 <- function(x) floor(x * 2) / 2
+  round_up_05 <- function(x) ceiling(x * 2) / 2
+
+  x_lim <- c(round_down_05(x_min), round_up_05(x_max))
+  y_lim <- c(round_down_05(y_min), round_up_05(y_max))
+
+  main_title <- paste0(
+    "Experiment ", strsplit(contrast_name, "_vs_")[[1]][2],
+    ", Control ", strsplit(contrast_name, "_vs_")[[1]][1]
+  )
+
+  p <- ggplot(df, aes(x = log2FC, y = y_vals)) +
+    geom_point(aes(color = color), size = 1.5, alpha = 0.8) +
+    scale_color_identity() +
+    labs(
+      x = "Log2 Fold Change",
+      y = "-Log10(p.adj)",
+      title = main_title
+    ) +
+    coord_cartesian(xlim = x_lim, ylim = y_lim) +
+    theme_minimal() +
+    theme(
+      legend.position = "none",
+      axis.text = element_text(color = "#000000", size = 6),
+      axis.title = element_text(color = "#000000", size = 6),
+      plot.title = element_text(size = 6, face = "bold"),
+      plot.subtitle = element_text(size = 6),
+      panel.grid = element_blank(),
+      panel.border = element_rect(color = "black", fill = NA, linewidth = 0.75),
+      panel.background = element_rect(fill = "white", colour = NA)
+    )
+
+  return(p)
+}
+
+p_CHX_vs_A5B5 <- fxx.plot_volcano_for_contrast(
+  contrast_name = "CHX_vs_A5B5",
+  list_obj = degs_list,
+  gene_symbol = "Gene Name",
+  log2FoldChange = "log2FoldChange"
+)
+
+p_PBS_vs_CHX <- fxx.plot_volcano_for_contrast(
+  contrast_name = "PBS_vs_CHX",
+  list_obj = degs_list,
+  gene_symbol = "Gene Name",
+  log2FoldChange = "log2FoldChange"
+)
+
+p_PBS_vs_A5B5 <- fxx.plot_volcano_for_contrast(
+  contrast_name = "PBS_vs_A5B5",
+  list_obj = degs_list,
+  gene_symbol = "Gene Name",
+  log2FoldChange = "log2FoldChange"
+)
+
+p_CHX_vs_A5B5.NoVline <- fxx.plot_volcano_for_contrast.NoVline(
+  contrast_name = "CHX_vs_A5B5",
+  list_obj = degs_list,
+  gene_symbol = "Gene Name",
+  log2FoldChange = "log2FoldChange"
+)
+
+p_PBS_vs_CHX.NoVline <- fxx.plot_volcano_for_contrast.NoVline(
+  contrast_name = "PBS_vs_CHX",
+  list_obj = degs_list,
+  gene_symbol = "Gene Name",
+  log2FoldChange = "log2FoldChange"
+)
+
+p_PBS_vs_A5B5.NoVline <- fxx.plot_volcano_for_contrast.NoVline(
+  contrast_name = "PBS_vs_A5B5",
+  list_obj = degs_list,
+  gene_symbol = "Gene Name",
+  log2FoldChange = "log2FoldChange"
+)
+
+out_dir <- "RNA.02.degs-02.VolPlot"
+setwd(file.path(root_path, res_folder, out_dir))
+
+```
+```{r Venn plot of common down-regulatd genes}
+##----------------------------------------------------------------------------##
+## Program: Venn
+##----------------------------------------------------------------------------##
+setwd(file.path(root_path, res_folder, "RNA.02.degs"))
+degs_list <- readRDS("PBS,CHX,AB5.degs_list(q_sig).Rds")
+
+sig_degs_list <- imap(degs_list, ~{
+  x <- .x
+  if (is.null(x) || nrow(x) == 0) return(tibble())
+  x %>% dplyr::filter(`q-value` < 0.05)
+})
+
+library(VennDiagram)
+
+venn.plot <- venn.diagram(
+  x = list(
+    sig_degs_list$CHX_vs_A5B5 %>% dplyr::filter(Regulation == "Down") %>% dplyr::pull(gene_symbol),
+    sig_degs_list$PBS_vs_A5B5 %>% dplyr::filter(Regulation == "Down") %>% dplyr::pull(gene_symbol),
+    sig_degs_list$PBS_vs_CHX %>% dplyr::filter(Regulation == "Down") %>% dplyr::pull(gene_symbol)
+  ),
+  category.names = c("CHX_vs_A5B5", "PBS_vs_A5B5", "PBS_vs_CHX"),
+  filename = NULL,
+  fill = c("#3C7584", "#949598", "#BE7A9A"),
+  cex = 0.6,
+  cat.cex = 0.6,
+  fontsize = 6,
+  cat.fontsize = 6,
+  lwd = 0.75,
+  lty = 1
+)
+
+grid.draw(venn.plot)
+
+out_dir <- "RNA.02.degs-03.VennPlot"
+fxx.create_and_setwd(file.path(root_path, res_folder, out_dir))
+fxx.save_baseplot_obj2res(
+  out_dir,
+  p_filename = "02.Venn(3_down_intersect)",
+  p = venn.plot,
+  height = 4.8,
+  width = 5,
+  dpi = 600
+)
+
+##================================##
+## Program: 2-set down intersection
+##================================##
+venn.plot <- venn.diagram(
+  x = list(
+    sig_degs_list$CHX_vs_A5B5 %>% dplyr::filter(Regulation == "Down") %>% dplyr::pull(gene_symbol),
+    sig_degs_list$PBS_vs_A5B5 %>% dplyr::filter(Regulation == "Down") %>% dplyr::pull(gene_symbol)
+  ),
+  category.names = c("CHX_vs_A5B5", "PBS_vs_A5B5"),
+  filename = NULL,
+  fill = c("#3C7584", "#949598"),
+  cex = 0.6,
+  cat.cex = 0.6,
+  fontsize = 6,
+  cat.fontsize = 6,
+  lwd = 0.75,
+  lty = 1
+)
+
+grid.draw(venn.plot)
+
+out_dir <- "RNA.02.degs-03.VennPlot"
+fxx.create_and_setwd(file.path(root_path, res_folder, out_dir))
+fxx.save_baseplot_obj2res(
+  out_dir,
+  p_filename = "01.Venn(2_down_intersect)",
+  p = venn.plot,
+  height = 4.8,
+  width = 5,
+  dpi = 600
+)
+```
+```{r Filtering and visualization of enriched pathways}
+##============================================================================##
+# Program: Visualization of RNA enrichment analysis results
+##============================================================================##
+
+# Read KEGG enrichment results
+setwd(file.path(root_path, res_folder, "RNA.03.Enrich"))
+kegg_enrich_df <- readxl::read_xlsx("Unique_down_in_A5B5.xlsx")
+
+# Read GO enrichment results
+setwd(file.path(root_path, res_folder, "RNA.03.Enrich"))
+go_kegg_df <- readxl::read_xlsx("GO_enrichment_results.xlsx", sheet = "GO_all")
+
+sig_enrich_diff <- list(
+  kegg = kegg_enrich_df %>% dplyr::filter(pvalue < 0.05),
+  go   = go_kegg_df %>% dplyr::filter(pvalue < 0.05)
+)
+
+dt <- sig_enrich_diff$kegg %>%
+  dplyr::mutate(
+    Pvalue = pvalue,
+    Description = Description,
+    geneID = GeneSymbol,
+    Cluster = subcategory
+  ) %>%
+  dplyr::select(Pvalue, Description, geneID, Cluster) %>%
+  dplyr::arrange(Pvalue) %>%
+  dplyr::mutate(Description = factor(Description, levels = rev(Description)))
+
+title <- "KEGG enrichment of Down-regualted RNA"
+x_axis_title <- "-Log10Pvalue"
+y_axis_title <- "Pathways"
+color_palette <- c("#9DB4CE", "#AFB2CF", "#C9CBD6", "#D7C6CA")
+
+p <- ggplot(dt) +
+  geom_bar(
+    aes(x = -log10(Pvalue), y = Description, fill = Cluster),
+    width = 0.5, stat = "identity", size = 0.2625
+  ) +
+  geom_text(
+    aes(x = 0.1, y = Description, label = Description),
+    size = 2.1, hjust = 0
+  ) +
+  geom_text(
+    aes(x = 0.1, y = Description, label = geneID, color = Cluster),
+    size = 2.1, fontface = "italic", hjust = 0, vjust = 2.3
+  ) +
+  scale_x_continuous(expand = c(0, 0)) +
+  scale_fill_manual(values = color_palette) +
+  scale_color_manual(values = color_palette) +
+  labs(
+    x = x_axis_title,
+    y = y_axis_title,
+    title = title
+  ) +
+  theme_classic() +
+  theme(
+    legend.position = "none",
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank(),
+    plot.title = element_text(size = 6, face = "bold", lineheight = 0.75),
+    axis.title = element_text(size = 6),
+    axis.text = element_text(size = 6),
+    axis.line = element_line(size = 0.2625),
+    panel.border = element_blank()
+  )
+
+
+out_dir <- "RNA.03.Enrich-02.Enrich Barplot"
+fxx.create_and_setwd(file.path(root_path, res_folder, out_dir))
+
+##============================================================================##
+# Program: Visualization of RNA GO enrichment analysis results
+##============================================================================##
+
+dt <- sig_enrich_diff$go %>%
+  dplyr::mutate(
+    Pvalue = pvalue,
+    Description = Description,
+    geneID = geneID,
+    Cluster = Cluster
+  ) %>%
+  dplyr::select(Pvalue, Description, geneID, Cluster) %>%
+  dplyr::arrange(Pvalue) %>%
+  dplyr::mutate(Description = factor(Description, levels = rev(Description)))
+
+title <- "GO enrichment of Down-regualted RNA"
+x_axis_title <- "-Log10Pvalue"
+y_axis_title <- "Pathways"
+color_palette <- c("#DACEC2", "#A3A5A6", "#F8D8B9")
+
+p <- ggplot(dt) +
+  geom_bar(
+    aes(x = -log10(Pvalue), y = Description, fill = Cluster),
+    width = 0.5, stat = "identity", size = 0.2625
+  ) +
+  geom_text(
+    aes(x = 0.1, y = Description, label = Description),
+    size = 2.1, hjust = 0
+  ) +
+  geom_text(
+    aes(x = 0.1, y = Description, label = geneID, color = Cluster),
+    size = 2.1, fontface = "italic", hjust = 0, vjust = 2.3
+  ) +
+  scale_x_continuous(expand = c(0, 0)) +
+  scale_fill_manual(values = color_palette) +
+  scale_color_manual(values = color_palette) +
+  labs(
+    x = x_axis_title,
+    y = y_axis_title,
+    title = title
+  ) +
+  theme_classic() +
+  theme(
+    legend.position = "none",
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank(),
+    plot.title = element_text(size = 6, face = "bold", lineheight = 0.75),
+    axis.title = element_text(size = 6),
+    axis.text = element_text(size = 6),
+    axis.line = element_line(size = 0.2625),
+    panel.border = element_blank()
+  )
+
+p
+
+out_dir <- "RNA.03.Enrich-02.Enrich Barplot"
+fxx.create_and_setwd(file.path(root_path, res_folder, out_dir))
+```
+```{r GSVA scoring of pathways}
+##======================##
+# Program: GSVA scoring with GO-based gene sets and differential analysis between two groups
+##======================##
+
+library(tidyverse)
+library(data.table)
+library(readxl)
+library(writexl)
+library(org.EcK12.eg.db)
+library(AnnotationDbi)
+library(GSEABase)
+library(fgsea)
+library(GSVA)
+library(limma)
+
+# Generate GO term to SYMBOL gene sets
+out_dir <- "RNA.05.EnrichPath-03.GSVA"
+fxx.create_and_setwd(file.path(root_path, res_folder, out_dir))
+
+go_df <- selected_pathes$go %>%
+  dplyr::select(ID, Description) %>%
+  distinct() %>%
+  drop_na(ID)
+
+go2sym <- AnnotationDbi::select(
+  org.EcK12.eg.db,
+  keys = go_df$ID,
+  keytype = "GO",
+  columns = c("SYMBOL")
+) %>%
+  as_tibble() %>%
+  filter(!is.na(SYMBOL)) %>%
+  distinct(GO, SYMBOL) %>%
+  inner_join(go_df, by = c("GO" = "ID")) %>%
+  transmute(term_id = GO, term_name = Description, gene = as.character(SYMBOL))
+
+gmt_go_list <- go2sym %>%
+  group_by(term_name, term_id) %>%
+  summarise(genes = list(sort(unique(gene))), .groups = "drop") %>%
+  mutate(size = lengths(genes)) %>%
+  filter(size >= 1) %>%
+  transmute(pathway = term_name, genes)
+
+gmt_go <- setNames(gmt_go_list$genes, gmt_go_list$pathway)
+saveRDS(gmt_go, "selected_GO.gmt_list.symbol.Rds")
+
+# GSVA: PBS vs A5B5
+setwd(file.path(root_path, res_folder, "RNA.01.matrix+clinical.format"))
+expr_mat <- readRDS("fpkm_log_matrix.Rds") %>%
+  as.data.frame() %>%
+  dplyr::select(
+    "PBS-1", "PBS-2", "PBS-3",
+    "AB5-1", "AB5-2", "AB5-3"
+  ) %>%
+  as.matrix()
+
+clinical <- readRDS("clinical.Rds") %>%
+  dplyr::filter(group %in% c("PBS", "A5B5"))
+
+clinical_sub <- clinical %>%
+  dplyr::filter(samples %in% colnames(expr_mat)) %>%
+  dplyr::select(samples, group) %>%
+  distinct() %>%
+  arrange(match(samples, colnames(expr_mat)))
+
+expr_mat <- expr_mat[, clinical_sub$samples, drop = FALSE]
+
+out_dir <- "RNA.05.EnrichPath-03.GSVA"
+fxx.create_and_setwd(file.path(root_path, res_folder, out_dir))
+
+gsva_score <- GSVA::gsva(
+  expr = expr_mat,
+  gset.idx.list = gmt_go,
+  method = "gsva",
+  kcdf = "Gaussian",
+  min.sz = 1,
+  max.sz = 5000,
+  verbose = FALSE
+)
+
+design <- model.matrix(~0 + group, data = clinical_sub)
+colnames(design) <- gsub("^group", "", colnames(design))
+
+fit <- lmFit(gsva_score, design) %>%
+  contrasts.fit(makeContrasts(A5B5 - PBS, levels = design)) %>%
+  eBayes()
+
+gsva_diff_tbl <- topTable(fit, number = Inf, sort.by = "P") %>%
+  as_tibble(rownames = "pathway") %>%
+  arrange(adj.P.Val, desc(logFC))
+
+saveRDS(gsva_score, "gsva_selected_GO_scores(PBS-vs-A5B5).Rds")
+write_xlsx(as.data.frame(gsva_score), "gsva_selected_GO(PBS-vs-A5B5).xlsx")
+saveRDS(gsva_diff_tbl, "gsva_selected_GO_diff(PBS-vs-A5B5).Rds")
+write_xlsx(gsva_diff_tbl, "gsva_selected_GO_diff(PBS-vs-A5B5).xlsx")
+
+# GSVA: CHX vs A5B5
+setwd(file.path(root_path, res_folder, "RNA.01.matrix+clinical.format"))
+expr_mat <- readRDS("fpkm_log_matrix.Rds") %>%
+  as.data.frame() %>%
+  dplyr::select(
+    "CHX1-1", "CHX1-2", "CHX1-3",
+    "AB5-1", "AB5-2", "AB5-3"
+  ) %>%
+  as.matrix()
+
+clinical <- readRDS("clinical.Rds") %>%
+  dplyr::filter(group %in% c("CHX", "A5B5"))
+
+clinical_sub <- clinical %>%
+  dplyr::filter(samples %in% colnames(expr_mat)) %>%
+  dplyr::select(samples, group) %>%
+  distinct() %>%
+  arrange(match(samples, colnames(expr_mat)))
+
+expr_mat <- expr_mat[, clinical_sub$samples, drop = FALSE]
+
+out_dir <- "RNA.05.EnrichPath-03.GSVA"
+fxx.create_and_setwd(file.path(root_path, res_folder, out_dir))
+
+gsva_score2 <- GSVA::gsva(
+  expr = expr_mat,
+  gset.idx.list = gmt_go,
+  method = "gsva",
+  kcdf = "Gaussian",
+  min.sz = 1,
+  max.sz = 5000,
+  verbose = FALSE
+)
+
+design2 <- model.matrix(~0 + group, data = clinical_sub)
+colnames(design2) <- gsub("^group", "", colnames(design2))
+
+fit2 <- lmFit(gsva_score2, design2) %>%
+  contrasts.fit(makeContrasts(A5B5 - CHX, levels = design2)) %>%
+  eBayes()
+
+gsva_diff_tbl2 <- topTable(fit2, number = Inf, sort.by = "P") %>%
+  as_tibble(rownames = "pathway") %>%
+  arrange(adj.P.Val, desc(logFC))
+
+saveRDS(gsva_score2, "gsva_selected_GO_scores(CHX-vs-A5B5).Rds")
+write_xlsx(as.data.frame(gsva_score2), "gsva_selected_GO(CHX-vs-A5B5).xlsx")
+saveRDS(gsva_diff_tbl2, "gsva_selected_GO_diff(CHX-vs-A5B5).Rds")
+write_xlsx(gsva_diff_tbl2, "gsva_selected_GO_diff(CHX-vs-A5B5).xlsx")
+```
+```{r ssGSEA scoring and differential analysis of pathways}
+library(tidyverse)
+library(data.table)
+library(readxl)
+library(writexl)
+library(org.EcK12.eg.db)
+library(AnnotationDbi)
+library(GSEABase)
+library(fgsea)
+library(GSVA)
+library(limma)
+
+# Generate GO gene sets (SYMBOL)
+out_dir <- "RNA.05.EnrichPath-02.GSVA,ssGSEA(2test)"
+fxx.create_and_setwd(file.path(root_path, res_folder, out_dir))
+
+out_dir <- "RNA.05.EnrichPath-01.GSEA"
+fxx.create_and_setwd(file.path(root_path, res_folder, out_dir))
+
+selected_pathes <- list(
+  kegg = read_xlsx("selected_pathway.xlsx", sheet = "RNA_kegg_path"),
+  go = read_xlsx("selected_pathway.xlsx", sheet = "RNA_go_path")
+)
+
+go_df <- selected_pathes$go %>%
+  dplyr::select(ID, Description) %>%
+  distinct() %>%
+  drop_na(ID)
+
+go2sym <- AnnotationDbi::select(
+  org.EcK12.eg.db,
+  keys = go_df$ID,
+  keytype = "GO",
+  columns = c("SYMBOL")
+) %>%
+  as_tibble() %>%
+  filter(!is.na(SYMBOL)) %>%
+  distinct(GO, SYMBOL) %>%
+  inner_join(go_df, by = c("GO" = "ID")) %>%
+  transmute(term_id = GO, term_name = Description, gene = as.character(SYMBOL))
+
+gmt_go_list <- go2sym %>%
+  group_by(term_name, term_id) %>%
+  summarise(genes = list(sort(unique(gene))), .groups = "drop") %>%
+  mutate(size = lengths(genes)) %>%
+  filter(size >= 1) %>%
+  transmute(pathway = term_name, genes)
+
+gmt_go <- setNames(gmt_go_list$genes, gmt_go_list$pathway)
+saveRDS(gmt_go, "selected_GO.gmt_list.symbol.Rds")
+
+# ssGSEA scoring
+setwd(file.path(root_path, res_folder, "RNA.01.matrix+clinical.format"))
+expr_mat <- readRDS("fpkm_log_matrix.Rds") %>%
+  as.data.frame() %>%
+  dplyr::select(
+    "PBS-1", "PBS-2", "PBS-3",
+    "CHX1-1", "CHX1-2", "CHX1-3",
+    "AB5-1", "AB5-2", "AB5-3"
+  ) %>%
+  as.matrix()
+
+clinical <- readRDS("clinical.Rds")
+
+clinical_sub <- clinical %>%
+  dplyr::filter(samples %in% colnames(expr_mat)) %>%
+  dplyr::select(samples, group) %>%
+  distinct() %>%
+  arrange(match(samples, colnames(expr_mat)))
+
+expr_mat <- expr_mat[, clinical_sub$samples, drop = FALSE]
+
+out_dir <- "RNA.05.EnrichPath-02.GSVA,ssGSEA(2test)"
+fxx.create_and_setwd(file.path(root_path, res_folder, out_dir))
+
+ssgsea_score <- GSVA::gsva(
+  expr = expr_mat,
+  gset.idx.list = gmt_go,
+  method = "ssgsea",
+  kcdf = "Gaussian",
+  abs.ranking = TRUE,
+  min.sz = 1,
+  max.sz = 5000,
+  verbose = FALSE
+)
+
+saveRDS(ssgsea_score, "ssgsea_selected_GO_scores(3Groups).Rds")
+write_xlsx(
+  ssgsea_score %>%
+    as.data.frame() %>%
+    tibble::rownames_to_column("path"),
+  "ssgsea_selected_GO.xlsx"
+)
+
+
+library(tidyverse)
+
+df <- tribble(
+  ~path, ~`PBS-1`, ~`PBS-2`, ~`PBS-3`, ~`CHX1-1`, ~`CHX1-2`, ~`CHX1-3`, ~`AB5-1`, ~`AB5-2`, ~`AB5-3`,
+  "DNA binding", 0.185947008, 0.194507403, 0.183985198, 0.19087857, 0.196241062, 0.175962293, 0.162752108, 0.17129049, 0.177750111,
+  "mRNA binding", 0.829159595, 0.738890157, 0.649852511, 0.478484664, 0.491360678, 0.423521717, 0.281376712, 0.462803479, 0.377862475,
+  "rRNA binding", 0.811337608, 0.743823033, 0.59909438, 0.365725401, 0.400473276, 0.210348354, 0.146979684, 0.363136706, 0.269256229,
+  "regulation of DNA-templated transcription", 0.047746697, 0.032556862, 0.002192562, 0.034520113, 0.044072895, 0.00545766, -0.030726281, -0.007969047, -0.000333256,
+  "ribosome binding", 0.624057569, 0.633417552, 0.549685017, 0.542042121, 0.545677052, 0.501881774, 0.292762151, 0.538725775, 0.431847478,
+  "sigma factor activity", 0.969273719, 0.964274345, 0.815508002, 0.947311289, 0.929735617, 0.810569981, 0.48730672, 0.716596497, 0.583816948,
+  "translation", 0.729093111, 0.70322633, 0.592351186, 0.403120328, 0.430374253, 0.288207258, 0.249063603, 0.420610759, 0.35461224
+)
+
+res <- df %>%
+  pivot_longer(-path, names_to = "sample", values_to = "value") %>%
+  mutate(group = case_when(
+    str_detect(sample, "^PBS") ~ "PBS",
+    str_detect(sample, "^CHX") ~ "CHX",
+    str_detect(sample, "^AB5") ~ "AB5"
+  )) %>%
+  group_by(path) %>%
+  summarise(
+    p_pbs_ab5 = t.test(value[group == "PBS"], value[group == "AB5"])$p.value,
+    p_chx_ab5 = t.test(value[group == "CHX"], value[group == "AB5"])$p.value,
+    .groups = "drop"
+  ) %>%
+  mutate(
+    padj_pbs_ab5 = p.adjust(p_pbs_ab5, method = "BH"),
+    padj_chx_ab5 = p.adjust(p_chx_ab5, method = "BH")
+  )
+
+sig_rows <- res %>%
+  filter(padj_pbs_ab5 < 0.05, padj_chx_ab5 < 0.05)
+
+res
+sig_rows
+```
